@@ -8,7 +8,7 @@ type EmbeddedPiQueueHandle = {
   queueMessage: (text: string) => Promise<void>;
   isStreaming: () => boolean;
   isCompacting: () => boolean;
-  abort: () => void;
+  abort: (reason?: unknown) => void;
 };
 
 const ACTIVE_EMBEDDED_RUNS = new Map<string, EmbeddedPiQueueHandle>();
@@ -37,14 +37,14 @@ export function queueEmbeddedPiMessage(sessionId: string, text: string): boolean
   return true;
 }
 
-export function abortEmbeddedPiRun(sessionId: string): boolean {
+export function abortEmbeddedPiRun(sessionId: string, reason?: unknown): boolean {
   const handle = ACTIVE_EMBEDDED_RUNS.get(sessionId);
   if (!handle) {
     diag.debug(`abort failed: sessionId=${sessionId} reason=no_active_run`);
     return false;
   }
   diag.debug(`aborting run: sessionId=${sessionId}`);
-  handle.abort();
+  handle.abort(reason);
   return true;
 }
 

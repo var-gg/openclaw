@@ -594,6 +594,54 @@ describe("runReplyAgent typing (heartbeat)", () => {
     }
   });
 
+  it("returns user-visible error for aborted empty runs when abort is not explicit", async () => {
+    const onAgentRunAbort = vi.fn();
+    state.runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [],
+      meta: { aborted: true, abortReason: "unknown" },
+    });
+
+    const { run } = createMinimalRun({
+      opts: { onAgentRunAbort },
+    });
+    const res = await run();
+    const payload = Array.isArray(res) ? res[0] : res;
+
+    expect(payload).toMatchObject({ isError: true });
+    expect(payload?.text).toContain("interrupted before a reply");
+    expect(onAgentRunAbort).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: expect.any(String),
+        reason: "unknown",
+        source: "unknown",
+        explicit: false,
+      }),
+    );
+  });
+
+  it("keeps explicit external aborts silent when payloads are empty", async () => {
+    const onAgentRunAbort = vi.fn();
+    state.runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [],
+      meta: { aborted: true, abortReason: "external_abort_signal" },
+    });
+
+    const { run } = createMinimalRun({
+      opts: { onAgentRunAbort },
+    });
+    const res = await run();
+
+    expect(res).toBeUndefined();
+    expect(onAgentRunAbort).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: expect.any(String),
+        reason: "external_abort_signal",
+        source: "external_abort_signal",
+        explicit: true,
+      }),
+    );
+  });
+
   it("retries transient HTTP failures once with timer-driven backoff", async () => {
     vi.useFakeTimers();
     let calls = 0;

@@ -34,6 +34,18 @@ export type EmbeddedPiRunMeta = {
   durationMs: number;
   agentMeta?: EmbeddedPiAgentMeta;
   aborted?: boolean;
+  abortSource?:
+    | "timeout"
+    | "superseded_by_new_message"
+    | "external_abort_signal"
+    | "gateway_stop"
+    | "unknown";
+  abortReason?:
+    | "timeout"
+    | "superseded_by_new_message"
+    | "external_abort_signal"
+    | "gateway_stop"
+    | "unknown";
   systemPromptReport?: SessionSystemPromptReport;
   error?: {
     kind:

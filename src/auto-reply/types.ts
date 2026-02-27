@@ -13,12 +13,19 @@ export type ModelSelectedContext = {
   thinkLevel: string | undefined;
 };
 
-export type TypingPolicy =
-  | "auto"
-  | "user_message"
-  | "system_event"
-  | "internal_webchat"
-  | "heartbeat";
+export type AgentRunAbortReason =
+  | "timeout"
+  | "superseded_by_new_message"
+  | "external_abort_signal"
+  | "gateway_stop"
+  | "unknown";
+
+export type AgentRunAbortContext = {
+  runId: string;
+  source: AgentRunAbortReason;
+  reason: AgentRunAbortReason;
+  explicit: boolean;
+};
 
 export type GetReplyOptions = {
   /** Override run id for agent events (defaults to random UUID). */
@@ -29,19 +36,15 @@ export type GetReplyOptions = {
   images?: ImageContent[];
   /** Notifies when an agent run actually starts (useful for webchat command handling). */
   onAgentRunStart?: (runId: string) => void;
+  /** Notifies when an agent run aborts, including normalized provenance. */
+  onAgentRunAbort?: (ctx: AgentRunAbortContext) => void;
   onReplyStart?: () => Promise<void> | void;
   /** Called when the typing controller cleans up (e.g., run ended with NO_REPLY). */
   onTypingCleanup?: () => void;
   onTypingController?: (typing: TypingController) => void;
   isHeartbeat?: boolean;
-  /** Policy-level typing control for run classes (user/system/internal/heartbeat). */
-  typingPolicy?: TypingPolicy;
-  /** Force-disable typing indicators for this run (system/internal/cross-channel routes). */
-  suppressTyping?: boolean;
   /** Resolved heartbeat model override (provider/model string from merged per-agent config). */
   heartbeatModelOverride?: string;
-  /** Controls bootstrap workspace context injection (default: full). */
-  bootstrapContextMode?: "full" | "lightweight";
   /** If true, suppress tool error warning payloads for this run. */
   suppressToolErrorWarnings?: boolean;
   onPartialReply?: (payload: ReplyPayload) => Promise<void> | void;

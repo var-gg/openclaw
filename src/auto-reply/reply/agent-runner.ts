@@ -28,7 +28,12 @@ import {
 } from "../fallback-state.js";
 import type { OriginatingChannelType, TemplateContext } from "../templating.js";
 import { resolveResponseUsageMode, type VerboseLevel } from "../thinking.js";
-import type { GetReplyOptions, ReplyPayload } from "../types.js";
+import type {
+  AgentRunAbortContext,
+  AgentRunAbortReason,
+  GetReplyOptions,
+  ReplyPayload,
+} from "../types.js";
 import { runAgentTurnWithFallback } from "./agent-runner-execution.js";
 import {
   createShouldEmitToolOutput,
@@ -58,6 +63,119 @@ import { createTypingSignaler } from "./typing-mode.js";
 import type { TypingController } from "./typing.js";
 
 const BLOCK_REPLY_SEND_TIMEOUT_MS = 15_000;
+
+const EXPLICIT_ABORT_REASONS = new Set<AgentRunAbortReason>([
+  "superseded_by_new_message",
+  "external_abort_signal",
+  "gateway_stop",
+]);
+
+function normalizeAbortReason(value: unknown): AgentRunAbortReason | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, "_");
+  if (!normalized) {
+    return undefined;
+  }
+  if (normalized.includes("timeout")) {
+    return "timeout";
+  }
+  if (normalized.includes("superseded_by_new_message") || normalized.includes("superseded")) {
+    return "superseded_by_new_message";
+  }
+  if (
+    normalized.includes("gateway_stop") ||
+    normalized.includes("gateway_shutdown") ||
+    normalized.includes("gatewaystop")
+  ) {
+    return "gateway_stop";
+  }
+  if (
+    normalized.includes("external_abort_signal") ||
+    normalized.includes("manual_abort") ||
+    normalized.includes("stop_command") ||
+    normalized.includes("abort_command") ||
+    normalized.includes("manual") ||
+    (normalized.includes("stop") && !normalized.includes("gateway"))
+  ) {
+    return "external_abort_signal";
+  }
+  return undefined;
+}
+
+function resolveAbortReasonFromUnknown(reason: unknown): AgentRunAbortReason | undefined {
+  const candidates: string[] = [];
+  if (typeof reason === "string") {
+    candidates.push(reason);
+  }
+  if (reason instanceof Error) {
+    candidates.push(reason.name, reason.message);
+    if ("cause" in reason && typeof reason.cause === "string") {
+      candidates.push(reason.cause);
+    }
+  }
+  if (reason && typeof reason === "object") {
+    const record = reason as Record<string, unknown>;
+    for (const key of ["source", "reason", "stopReason", "code", "name", "type"] as const) {
+      const value = record[key];
+      if (typeof value === "string") {
+        candidates.push(value);
+      }
+    }
+  }
+  for (const candidate of candidates) {
+    const normalized = normalizeAbortReason(candidate);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return candidates.length > 0 ? "unknown" : undefined;
+}
+
+function resolveRunAbortContext(params: {
+  runId: string;
+  runResult: { meta?: { aborted?: boolean; abortSource?: unknown; abortReason?: unknown } };
+  opts?: GetReplyOptions;
+}): AgentRunAbortContext | undefined {
+  if (!params.runResult.meta?.aborted) {
+    return undefined;
+  }
+  const reason =
+    resolveAbortReasonFromUnknown(params.runResult.meta.abortReason) ??
+    resolveAbortReasonFromUnknown(params.runResult.meta.abortSource) ??
+    (params.opts?.abortSignal?.aborted
+      ? resolveAbortReasonFromUnknown(
+          "reason" in params.opts.abortSignal
+            ? (params.opts.abortSignal as { reason?: unknown }).reason
+            : undefined,
+        )
+      : undefined) ??
+    "unknown";
+  return {
+    runId: params.runId,
+    source: reason,
+    reason,
+    explicit: EXPLICIT_ABORT_REASONS.has(reason),
+  };
+}
+
+function buildAbortedEmptyReplyPayload(reason: AgentRunAbortReason): ReplyPayload {
+  if (reason === "timeout") {
+    return {
+      text:
+        "Request timed out before a response was generated. " +
+        "Please retry, or increase `agents.defaults.timeoutSeconds` in your config.",
+      isError: true,
+    };
+  }
+  return {
+    text:
+      "The run was interrupted before a reply was generated. " +
+      "Please resend your message to continue.",
+    isError: true,
+  };
+}
 
 export async function runReplyAgent(params: {
   commandBody: string;
@@ -371,6 +489,10 @@ export async function runReplyAgent(params: {
       directlySentBlockKeys,
     } = runOutcome;
     let { didLogHeartbeatStrip, autoCompactionCompleted } = runOutcome;
+    const abortContext = resolveRunAbortContext({ runId, runResult, opts });
+    if (abortContext) {
+      opts?.onAgentRunAbort?.(abortContext);
+    }
 
     if (
       shouldInjectGroupIntro &&
@@ -472,6 +594,13 @@ export async function runReplyAgent(params: {
     // Otherwise, a late typing trigger (e.g. from a tool callback) can outlive the run and
     // keep the typing indicator stuck.
     if (payloadArray.length === 0) {
+      if (abortContext && !abortContext.explicit) {
+        return finalizeWithFollowup(
+          buildAbortedEmptyReplyPayload(abortContext.reason),
+          queueKey,
+          runFollowupTurn,
+        );
+      }
       return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);
     }
 

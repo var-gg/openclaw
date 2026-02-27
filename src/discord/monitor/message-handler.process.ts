@@ -1,4 +1,4 @@
-import { ChannelType, type RequestClient } from "@buape/carbon";
+import { ChannelType } from "@buape/carbon";
 import { resolveAckReaction, resolveHumanDelayConfig } from "../../agents/identity.js";
 import { EmbeddedBlockChunker } from "../../agents/pi-embedded-block-chunker.js";
 import { resolveChunkMode } from "../../auto-reply/chunk.js";
@@ -10,7 +10,7 @@ import {
 } from "../../auto-reply/reply/history.js";
 import { finalizeInboundContext } from "../../auto-reply/reply/inbound-context.js";
 import { createReplyDispatcherWithTyping } from "../../auto-reply/reply/reply-dispatcher.js";
-import type { ReplyPayload } from "../../auto-reply/types.js";
+import type { AgentRunAbortContext, ReplyPayload } from "../../auto-reply/types.js";
 import { shouldAckReaction as shouldAckReactionGate } from "../../channels/ack-reactions.js";
 import { logTypingFailure, logAckFailure } from "../../channels/logging.js";
 import { createReplyPrefixOptions } from "../../channels/reply-prefix.js";
@@ -27,7 +27,6 @@ import { resolveMarkdownTableMode } from "../../config/markdown-tables.js";
 import { readSessionUpdatedAt, resolveStorePath } from "../../config/sessions.js";
 import { danger, logVerbose, shouldLogVerbose } from "../../globals.js";
 import { convertMarkdownTables } from "../../markdown/tables.js";
-import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
 import { buildAgentSessionKey } from "../../routing/resolve-route.js";
 import { resolveThreadSessionKeys } from "../../routing/session-key.js";
 import { buildUntrustedChannelMetadata } from "../../security/channel-metadata.js";
@@ -58,10 +57,42 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-const DISCORD_TYPING_MAX_DURATION_MS = 20 * 60_000;
+type DiscordLifecycleEvent =
+  | "run_start"
+  | "run_end"
+  | "run_abort"
+  | "send_start"
+  | "send_end"
+  | "send_fail";
 
-function isProcessAborted(abortSignal?: AbortSignal): boolean {
-  return Boolean(abortSignal?.aborted);
+function emitDiscordLifecycleLog(params: {
+  runtime: { log?: (...args: unknown[]) => void };
+  event: DiscordLifecycleEvent;
+  fields: {
+    runId?: string;
+    sessionKey?: string;
+    channelId?: string;
+    messageId?: string;
+    threadId?: string | number;
+    accountId?: string;
+    source?: string;
+    reason?: string;
+    explicit?: boolean;
+    kind?: string;
+    queuedFinal?: boolean;
+    finalQueuedCount?: number;
+    finalSendAttempts?: number;
+    finalSendSucceeded?: number;
+    finalSendFailed?: number;
+    error?: string;
+  };
+}): void {
+  params.runtime.log?.(
+    `discord.lifecycle ${JSON.stringify({
+      event: params.event,
+      ...params.fields,
+    })}`,
+  );
 }
 
 export async function processDiscordMessage(ctx: DiscordMessagePreflightContext) {
@@ -108,44 +139,21 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     threadBindings,
     route,
     commandAuthorized,
-    discordRestFetch,
-    abortSignal,
   } = ctx;
-  if (isProcessAborted(abortSignal)) {
-    return;
-  }
 
-  const ssrfPolicy = cfg.browser?.ssrfPolicy;
-  const mediaList = await resolveMediaList(message, mediaMaxBytes, discordRestFetch, ssrfPolicy);
-  if (isProcessAborted(abortSignal)) {
-    return;
-  }
-  const forwardedMediaList = await resolveForwardedMediaList(
-    message,
-    mediaMaxBytes,
-    discordRestFetch,
-    ssrfPolicy,
-  );
-  if (isProcessAborted(abortSignal)) {
-    return;
-  }
+  const mediaList = await resolveMediaList(message, mediaMaxBytes);
+  const forwardedMediaList = await resolveForwardedMediaList(message, mediaMaxBytes);
   mediaList.push(...forwardedMediaList);
   const text = messageText;
   if (!text) {
-    logVerbose("discord: drop message " + message.id + " (empty content)");
+    logVerbose(`discord: drop message ${message.id} (empty content)`);
     return;
-  }
-
-  const boundThreadId = ctx.threadBinding?.conversation?.conversationId?.trim();
-  if (boundThreadId && typeof threadBindings.touchThread === "function") {
-    threadBindings.touchThread({ threadId: boundThreadId });
   }
   const ackReaction = resolveAckReaction(cfg, route.agentId, {
     channel: "discord",
     accountId,
   });
   const removeAckAfterReply = cfg.messages?.removeAckAfterReply ?? false;
-  const mediaLocalRoots = getAgentScopedMediaLocalRoots(cfg, route.agentId);
   const shouldAckReaction = () =>
     Boolean(
       ackReaction &&
@@ -161,17 +169,15 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
       }),
     );
   const statusReactionsEnabled = shouldAckReaction();
-  // Discord outbound helpers expect Carbon's request client shape explicitly.
-  const discordRest = client.rest as unknown as RequestClient;
   const discordAdapter: StatusReactionAdapter = {
     setReaction: async (emoji) => {
       await reactMessageDiscord(messageChannelId, message.id, emoji, {
-        rest: discordRest,
+        rest: client.rest as never,
       });
     },
     removeReaction: async (emoji) => {
       await removeReactionDiscord(messageChannelId, message.id, emoji, {
-        rest: discordRest,
+        rest: client.rest as never,
       });
     },
   };
@@ -179,8 +185,6 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     enabled: statusReactionsEnabled,
     adapter: discordAdapter,
     initialEmoji: ackReaction,
-    emojis: cfg.messages?.statusReactions?.emojis,
-    timing: cfg.messages?.statusReactions?.timing,
     onError: (err) => {
       logAckFailure({
         log: logVerbose,
@@ -398,6 +402,44 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     OriginatingTo: autoThreadContext?.OriginatingTo ?? replyTarget,
   });
   const persistedSessionKey = ctxPayload.SessionKey ?? route.sessionKey;
+  let lifecycleRunId: string | undefined;
+  let finalSendAttempts = 0;
+  let finalSendSucceeded = 0;
+  let finalSendFailed = 0;
+  let fallbackFinalSent = false;
+  const lifecycleCorrelation = {
+    sessionKey: persistedSessionKey,
+    channelId: messageChannelId,
+    messageId: message.id,
+    threadId: ctxPayload.MessageThreadId,
+    accountId,
+  };
+  const emitLifecycle = (
+    event: DiscordLifecycleEvent,
+    fields: {
+      runId?: string;
+      source?: string;
+      reason?: string;
+      explicit?: boolean;
+      kind?: string;
+      queuedFinal?: boolean;
+      finalQueuedCount?: number;
+      finalSendAttempts?: number;
+      finalSendSucceeded?: number;
+      finalSendFailed?: number;
+      error?: string;
+    } = {},
+  ) => {
+    emitDiscordLifecycleLog({
+      runtime,
+      event,
+      fields: {
+        ...lifecycleCorrelation,
+        runId: fields.runId ?? lifecycleRunId,
+        ...fields,
+      },
+    });
+  };
 
   await recordInboundSession({
     storePath,
@@ -448,8 +490,6 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
         error: err,
       });
     },
-    // Long tool-heavy runs are expected on Discord; keep heartbeats alive.
-    maxDurationMs: DISCORD_TYPING_MAX_DURATION_MS,
   });
 
   // --- Discord draft stream (edit-based preview streaming) ---
@@ -594,21 +634,66 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
 
   // When draft streaming is active, suppress block streaming to avoid double-streaming.
   const disableBlockStreamingForDraft = draftStream ? true : undefined;
+  const sendDeliveryFailureFallback = async (trigger: "dispatch_error" | "send_fail") => {
+    if (fallbackFinalSent || replyReference.hasReplied()) {
+      return;
+    }
+    fallbackFinalSent = true;
+    const fallbackPayload: ReplyPayload = {
+      text:
+        "I couldn't deliver the previous response due to a Discord send error. " +
+        "Please resend your message.",
+      isError: true,
+    };
+    const replyToId = replyReference.use();
+    finalSendAttempts += 1;
+    emitLifecycle("send_start", { kind: "fallback", reason: trigger });
+    try {
+      await deliverDiscordReply({
+        replies: [fallbackPayload],
+        target: deliverTarget,
+        token,
+        accountId,
+        rest: client.rest,
+        runtime,
+        replyToId,
+        replyToMode,
+        textLimit,
+        maxLinesPerMessage: discordConfig?.maxLinesPerMessage,
+        tableMode,
+        chunkMode,
+        sessionKey: ctxPayload.SessionKey,
+        threadBindings,
+      });
+      replyReference.markSent();
+      finalSendSucceeded += 1;
+      emitLifecycle("send_end", { kind: "fallback", reason: trigger });
+    } catch (fallbackErr) {
+      finalSendFailed += 1;
+      emitLifecycle("send_fail", {
+        kind: "fallback",
+        reason: trigger,
+        error: String(fallbackErr),
+      });
+      runtime.error?.(danger(`discord fallback reply failed: ${String(fallbackErr)}`));
+    }
+  };
 
-  const { dispatcher, replyOptions, markDispatchIdle, markRunComplete } =
-    createReplyDispatcherWithTyping({
-      ...prefixOptions,
-      humanDelay: resolveHumanDelayConfig(cfg, route.agentId),
-      typingCallbacks,
-      deliver: async (payload: ReplyPayload, info) => {
-        if (isProcessAborted(abortSignal)) {
-          return;
-        }
-        const isFinal = info.kind === "final";
-        if (payload.isReasoning) {
-          // Reasoning/thinking payloads should not be delivered to Discord.
-          return;
-        }
+  const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
+    ...prefixOptions,
+    humanDelay: resolveHumanDelayConfig(cfg, route.agentId),
+    deliver: async (payload: ReplyPayload, info) => {
+      const isFinal = info.kind === "final";
+      if (isFinal) {
+        finalSendAttempts += 1;
+        emitLifecycle("send_start", { kind: info.kind });
+      }
+      if (info.kind === "block") {
+        // Block payloads carry reasoning/thinking content that should not be
+        // delivered to external channels. Skip them regardless of streamMode.
+        return;
+      }
+      try {
         if (draftStream && isFinal) {
           await flushDraft();
           const hasMedia = Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
@@ -626,9 +711,6 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
 
           if (canFinalizeViaPreviewEdit) {
             await draftStream.stop();
-            if (isProcessAborted(abortSignal)) {
-              return;
-            }
             try {
               await editMessageDiscord(
                 deliverChannelId,
@@ -638,6 +720,10 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
               );
               finalizedViaPreviewMessage = true;
               replyReference.markSent();
+              if (isFinal) {
+                finalSendSucceeded += 1;
+                emitLifecycle("send_end", { kind: info.kind });
+              }
               return;
             } catch (err) {
               logVerbose(
@@ -649,9 +735,6 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
           // Check if stop() flushed a message we can edit
           if (!finalizedViaPreviewMessage) {
             await draftStream.stop();
-            if (isProcessAborted(abortSignal)) {
-              return;
-            }
             const messageIdAfterStop = draftStream.messageId();
             if (
               typeof messageIdAfterStop === "string" &&
@@ -668,6 +751,10 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
                 );
                 finalizedViaPreviewMessage = true;
                 replyReference.markSent();
+                if (isFinal) {
+                  finalSendSucceeded += 1;
+                  emitLifecycle("send_end", { kind: info.kind });
+                }
                 return;
               } catch (err) {
                 logVerbose(
@@ -681,9 +768,6 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
           if (!finalizedViaPreviewMessage) {
             await draftStream.clear();
           }
-        }
-        if (isProcessAborted(abortSignal)) {
-          return;
         }
 
         const replyToId = replyReference.use();
@@ -702,37 +786,60 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
           chunkMode,
           sessionKey: ctxPayload.SessionKey,
           threadBindings,
-          mediaLocalRoots,
         });
         replyReference.markSent();
-      },
-      onError: (err, info) => {
-        runtime.error?.(danger(`discord ${info.kind} reply failed: ${String(err)}`));
-      },
-      onReplyStart: async () => {
-        if (isProcessAborted(abortSignal)) {
-          return;
+        if (isFinal) {
+          finalSendSucceeded += 1;
+          emitLifecycle("send_end", { kind: info.kind });
         }
-        await typingCallbacks.onReplyStart();
-        await statusReactions.setThinking();
-      },
-    });
+      } catch (err) {
+        if (isFinal) {
+          finalSendFailed += 1;
+          emitLifecycle("send_fail", { kind: info.kind, error: String(err) });
+        }
+        throw err;
+      }
+    },
+    onError: (err, info) => {
+      runtime.error?.(danger(`discord ${info.kind} reply failed: ${String(err)}`));
+    },
+    onReplyStart: async () => {
+      await typingCallbacks.onReplyStart();
+      await statusReactions.setThinking();
+    },
+  });
 
   let dispatchResult: Awaited<ReturnType<typeof dispatchInboundMessage>> | null = null;
   let dispatchError = false;
-  let dispatchAborted = false;
-  try {
-    if (isProcessAborted(abortSignal)) {
-      dispatchAborted = true;
+  let dispatchThrown: unknown;
+  let didEmitRunStart = false;
+  const emitRunStart = (runId?: string) => {
+    if (didEmitRunStart) {
       return;
     }
+    didEmitRunStart = true;
+    emitLifecycle("run_start", { runId });
+  };
+  try {
     dispatchResult = await dispatchInboundMessage({
       ctx: ctxPayload,
       cfg,
       dispatcher,
       replyOptions: {
         ...replyOptions,
-        abortSignal,
+        onAgentRunStart: (runId) => {
+          lifecycleRunId = runId;
+          emitRunStart(runId);
+        },
+        onAgentRunAbort: (abortCtx: AgentRunAbortContext) => {
+          lifecycleRunId = abortCtx.runId;
+          emitLifecycle("run_abort", {
+            runId: abortCtx.runId,
+            source: abortCtx.source,
+            reason: abortCtx.reason,
+            explicit: abortCtx.explicit,
+          });
+        },
         skillFilter: channelConfig?.skills,
         disableBlockStreaming:
           disableBlockStreamingForDraft ??
@@ -767,64 +874,52 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
           await statusReactions.setThinking();
         },
         onToolStart: async (payload) => {
-          if (isProcessAborted(abortSignal)) {
-            return;
-          }
           await statusReactions.setTool(payload.name);
         },
       },
     });
-    if (isProcessAborted(abortSignal)) {
-      dispatchAborted = true;
-      return;
-    }
   } catch (err) {
-    if (isProcessAborted(abortSignal)) {
-      dispatchAborted = true;
-      return;
-    }
     dispatchError = true;
-    throw err;
+    dispatchThrown = err;
   } finally {
-    try {
-      // Must stop() first to flush debounced content before clear() wipes state.
-      await draftStream?.stop();
-      if (!finalizedViaPreviewMessage) {
-        await draftStream?.clear();
-      }
-    } catch (err) {
-      // Draft cleanup should never keep typing alive.
-      logVerbose(`discord: draft cleanup failed: ${String(err)}`);
-    } finally {
-      markRunComplete();
-      markDispatchIdle();
+    // Must stop() first to flush debounced content before clear() wipes state
+    await draftStream?.stop();
+    if (!finalizedViaPreviewMessage) {
+      await draftStream?.clear();
     }
+    markDispatchIdle();
     if (statusReactionsEnabled) {
-      if (dispatchAborted) {
-        if (removeAckAfterReply) {
-          void statusReactions.clear();
-        } else {
-          void statusReactions.restoreInitial();
-        }
+      if (dispatchError) {
+        await statusReactions.setError();
       } else {
-        if (dispatchError) {
-          await statusReactions.setError();
-        } else {
-          await statusReactions.setDone();
-        }
-        if (removeAckAfterReply) {
-          void (async () => {
-            await sleep(dispatchError ? DEFAULT_TIMING.errorHoldMs : DEFAULT_TIMING.doneHoldMs);
-            await statusReactions.clear();
-          })();
-        } else {
-          void statusReactions.restoreInitial();
-        }
+        await statusReactions.setDone();
+      }
+      if (removeAckAfterReply) {
+        void (async () => {
+          await sleep(dispatchError ? DEFAULT_TIMING.errorHoldMs : DEFAULT_TIMING.doneHoldMs);
+          await statusReactions.clear();
+        })();
+      } else {
+        void statusReactions.restoreInitial();
       }
     }
   }
-  if (dispatchAborted) {
-    return;
+  if (dispatchError && finalSendSucceeded === 0) {
+    await sendDeliveryFailureFallback("dispatch_error");
+  } else if (finalSendFailed > 0 && finalSendSucceeded === 0) {
+    await sendDeliveryFailureFallback("send_fail");
+  }
+  emitRunStart(lifecycleRunId);
+  emitLifecycle("run_end", {
+    queuedFinal: dispatchResult?.queuedFinal ?? false,
+    finalQueuedCount: dispatchResult?.counts.final ?? 0,
+    finalSendAttempts,
+    finalSendSucceeded,
+    finalSendFailed,
+    ...(dispatchThrown ? { error: String(dispatchThrown) } : {}),
+  });
+  if (dispatchThrown) {
+    throw dispatchThrown;
   }
 
   if (!dispatchResult?.queuedFinal) {

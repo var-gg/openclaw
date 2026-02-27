@@ -1,4 +1,3 @@
-import { getAcpSessionManager } from "../../acp/control-plane/manager.js";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { abortEmbeddedPiRun } from "../../agents/pi-embedded.js";
 import {
@@ -21,15 +20,8 @@ import { parseAgentSessionKey } from "../../routing/session-key.js";
 import { resolveCommandAuthorization } from "../command-auth.js";
 import { normalizeCommandBody, type CommandNormalizeOptions } from "../commands-registry.js";
 import type { FinalizedMsgContext, MsgContext } from "../templating.js";
-import {
-  applyAbortCutoffToSessionEntry,
-  resolveAbortCutoffFromContext,
-  shouldPersistAbortCutoff,
-} from "./abort-cutoff.js";
 import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
 import { clearSessionQueues } from "./queue.js";
-
-export { resolveAbortCutoffFromContext, shouldSkipMessageByAbortCutoff } from "./abort-cutoff.js";
 
 const ABORT_TRIGGERS = new Set([
   "stop",
@@ -71,7 +63,6 @@ const ABORT_TRIGGERS = new Set([
   "stop dont do anything",
   "stop do not do anything",
   "stop doing anything",
-  "do not do that",
   "please stop",
   "stop please",
 ]);
@@ -239,7 +230,9 @@ export function stopSubagentsForRequester(params: {
       }
       const entry = store[childKey];
       const sessionId = entry?.sessionId;
-      const aborted = sessionId ? abortEmbeddedPiRun(sessionId) : false;
+      const aborted = sessionId
+        ? abortEmbeddedPiRun(sessionId, { source: "external_abort_signal", trigger: "abort_command" })
+        : false;
       const markedTerminated =
         markSubagentRunTerminated({
           runId: run.runId,
@@ -302,42 +295,18 @@ export async function tryFastAbortFromMessage(params: {
     const storePath = resolveStorePath(cfg.session?.store, { agentId });
     const store = loadSessionStore(storePath);
     const { entry, key } = resolveSessionEntryForKey(store, targetKey);
-    const resolvedTargetKey = key ?? targetKey;
-    const acpManager = getAcpSessionManager();
-    const acpResolution = acpManager.resolveSession({
-      cfg,
-      sessionKey: resolvedTargetKey,
-    });
-    if (acpResolution.kind !== "none") {
-      try {
-        await acpManager.cancelSession({
-          cfg,
-          sessionKey: resolvedTargetKey,
-          reason: "fast-abort",
-        });
-      } catch (error) {
-        logVerbose(
-          `abort: ACP cancel failed for ${resolvedTargetKey}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
     const sessionId = entry?.sessionId;
-    const aborted = sessionId ? abortEmbeddedPiRun(sessionId) : false;
-    const cleared = clearSessionQueues([resolvedTargetKey, sessionId]);
+    const aborted = sessionId
+      ? abortEmbeddedPiRun(sessionId, { source: "external_abort_signal", trigger: "abort_command" })
+      : false;
+    const cleared = clearSessionQueues([key ?? targetKey, sessionId]);
     if (cleared.followupCleared > 0 || cleared.laneCleared > 0) {
       logVerbose(
         `abort: cleared followups=${cleared.followupCleared} lane=${cleared.laneCleared} keys=${cleared.keys.join(",")}`,
       );
     }
-    const abortCutoff = shouldPersistAbortCutoff({
-      commandSessionKey: ctx.SessionKey,
-      targetSessionKey: resolvedTargetKey,
-    })
-      ? resolveAbortCutoffFromContext(ctx)
-      : undefined;
     if (entry && key) {
       entry.abortedLastRun = true;
-      applyAbortCutoffToSessionEntry(entry, abortCutoff);
       entry.updatedAt = Date.now();
       store[key] = entry;
       await updateSessionStore(storePath, (nextStore) => {
@@ -346,7 +315,6 @@ export async function tryFastAbortFromMessage(params: {
           return;
         }
         nextEntry.abortedLastRun = true;
-        applyAbortCutoffToSessionEntry(nextEntry, abortCutoff);
         nextEntry.updatedAt = Date.now();
         nextStore[key] = nextEntry;
       });

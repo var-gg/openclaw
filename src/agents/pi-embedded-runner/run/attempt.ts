@@ -1347,6 +1347,7 @@ export async function runEmbeddedAttempt(
       }
 
       let aborted = Boolean(params.abortSignal?.aborted);
+      let abortReason: unknown = undefined;
       let timedOut = false;
       let timedOutDuringCompaction = false;
       const getAbortReason = (signal: AbortSignal): unknown =>
@@ -1367,11 +1368,11 @@ export async function runEmbeddedAttempt(
         if (isTimeout) {
           timedOut = true;
         }
-        if (isTimeout) {
-          runAbortController.abort(reason ?? makeTimeoutAbortReason());
-        } else {
-          runAbortController.abort(reason);
+        const resolvedReason = isTimeout ? (reason ?? makeTimeoutAbortReason()) : reason;
+        if (abortReason === undefined && resolvedReason !== undefined) {
+          abortReason = resolvedReason;
         }
+        runAbortController.abort(resolvedReason);
         void activeSession.abort();
       };
       const abortable = <T>(promise: Promise<T>): Promise<T> => {
@@ -1445,7 +1446,9 @@ export async function runEmbeddedAttempt(
         },
         isStreaming: () => activeSession.isStreaming,
         isCompacting: () => subscription.isCompacting(),
-        abort: abortRun,
+        abort: (reason?: unknown) => {
+          abortRun(false, reason);
+        },
       };
       setActiveEmbeddedRun(params.sessionId, queueHandle, params.sessionKey);
 
@@ -1467,7 +1470,7 @@ export async function runEmbeddedAttempt(
           ) {
             timedOutDuringCompaction = true;
           }
-          abortRun(true);
+          abortRun(true, makeTimeoutAbortReason());
           if (!abortWarnTimer) {
             abortWarnTimer = setTimeout(() => {
               if (!activeSession.isStreaming) {
@@ -1869,6 +1872,7 @@ export async function runEmbeddedAttempt(
 
       return {
         aborted,
+        abortReason,
         timedOut,
         timedOutDuringCompaction,
         promptError,
