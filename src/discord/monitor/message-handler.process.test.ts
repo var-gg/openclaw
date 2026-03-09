@@ -50,13 +50,19 @@ type DispatchInboundParams = {
     onAssistantMessageStart?: () => Promise<void> | void;
   };
 };
-const dispatchInboundMessage = vi.fn(async (_params?: DispatchInboundParams) => ({
-  queuedFinal: false,
-  counts: { final: 0, tool: 0, block: 0 },
+const runtimeMocks = vi.hoisted(() => ({
+  dispatchInboundMessage: vi.fn(async (_params?: DispatchInboundParams) => ({
+    queuedFinal: false,
+    counts: { final: 0, tool: 0, block: 0 },
+  })),
+  recordInboundSession: vi.fn(async () => {}),
+  readSessionUpdatedAt: vi.fn(() => undefined),
+  resolveStorePath: vi.fn(() => "/tmp/openclaw-discord-process-test-sessions.json"),
 }));
-const recordInboundSession = vi.fn(async () => {});
-const readSessionUpdatedAt = vi.fn(() => undefined);
-const resolveStorePath = vi.fn(() => "/tmp/openclaw-discord-process-test-sessions.json");
+const dispatchInboundMessage = runtimeMocks.dispatchInboundMessage;
+const recordInboundSession = runtimeMocks.recordInboundSession;
+const readSessionUpdatedAt = runtimeMocks.readSessionUpdatedAt;
+const resolveStorePath = runtimeMocks.resolveStorePath;
 
 vi.mock("../send.js", () => ({
   reactMessageDiscord: sendMocks.reactMessageDiscord,
@@ -76,7 +82,7 @@ vi.mock("./reply-delivery.js", () => ({
 }));
 
 vi.mock("../../auto-reply/dispatch.js", () => ({
-  dispatchInboundMessage,
+  dispatchInboundMessage: runtimeMocks.dispatchInboundMessage,
 }));
 
 vi.mock("../../auto-reply/reply/reply-dispatcher.js", () => ({
@@ -115,12 +121,12 @@ vi.mock("../../auto-reply/reply/reply-dispatcher.js", () => ({
 }));
 
 vi.mock("../../channels/session.js", () => ({
-  recordInboundSession,
+  recordInboundSession: runtimeMocks.recordInboundSession,
 }));
 
 vi.mock("../../config/sessions.js", () => ({
-  readSessionUpdatedAt,
-  resolveStorePath,
+  readSessionUpdatedAt: runtimeMocks.readSessionUpdatedAt,
+  resolveStorePath: runtimeMocks.resolveStorePath,
 }));
 
 const { processDiscordMessage } = await import("./message-handler.process.js");

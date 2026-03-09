@@ -87,6 +87,17 @@ function resolveSpawnInvocation(params: {
   return materializeWindowsSpawnProgram(program, params.args);
 }
 
+function isWindowsCmdSpawnEinval(err: unknown, command: string): boolean {
+  if (process.platform !== "win32") {
+    return false;
+  }
+  const errno = err as NodeJS.ErrnoException | undefined;
+  if (errno?.code !== "EINVAL") {
+    return false;
+  }
+  return /(^|[\\/])mcporter\.cmd$/i.test(command);
+}
+
 function hasHanScript(value: string): boolean {
   return HAN_SCRIPT_RE.test(value);
 }
@@ -1330,67 +1341,89 @@ export class QmdMemoryManager implements MemorySearchManager {
     args: string[],
     opts?: { timeoutMs?: number },
   ): Promise<{ stdout: string; stderr: string }> {
-    return await new Promise((resolve, reject) => {
-      const spawnInvocation = resolveSpawnInvocation({
-        command: "mcporter",
-        args,
-        env: this.env,
-        packageName: "mcporter",
+    const runWithInvocation = async (spawnInvocation: {
+      command: string;
+      argv: string[];
+      shell?: boolean;
+      windowsHide?: boolean;
+    }): Promise<{ stdout: string; stderr: string }> =>
+      await new Promise((resolve, reject) => {
+        const commandSummary = `${spawnInvocation.command} ${spawnInvocation.argv.join(" ")}`;
+        const child = spawn(spawnInvocation.command, spawnInvocation.argv, {
+          // Keep mcporter and direct qmd commands on the same agent-scoped XDG state.
+          env: this.env,
+          cwd: this.workspaceDir,
+          shell: spawnInvocation.shell,
+          windowsHide: spawnInvocation.windowsHide,
+        });
+        let stdout = "";
+        let stderr = "";
+        let stdoutTruncated = false;
+        let stderrTruncated = false;
+        const timer = opts?.timeoutMs
+          ? setTimeout(() => {
+              child.kill("SIGKILL");
+              reject(new Error(`mcporter ${args.join(" ")} timed out after ${opts.timeoutMs}ms`));
+            }, opts.timeoutMs)
+          : null;
+        child.stdout.on("data", (data) => {
+          const next = appendOutputWithCap(stdout, data.toString("utf8"), this.maxQmdOutputChars);
+          stdout = next.text;
+          stdoutTruncated = stdoutTruncated || next.truncated;
+        });
+        child.stderr.on("data", (data) => {
+          const next = appendOutputWithCap(stderr, data.toString("utf8"), this.maxQmdOutputChars);
+          stderr = next.text;
+          stderrTruncated = stderrTruncated || next.truncated;
+        });
+        child.on("error", (err) => {
+          if (timer) {
+            clearTimeout(timer);
+          }
+          reject(err);
+        });
+        child.on("close", (code) => {
+          if (timer) {
+            clearTimeout(timer);
+          }
+          if (stdoutTruncated || stderrTruncated) {
+            reject(
+              new Error(
+                `mcporter ${args.join(" ")} produced too much output (limit ${this.maxQmdOutputChars} chars)`,
+              ),
+            );
+            return;
+          }
+          if (code === 0) {
+            resolve({ stdout, stderr });
+          } else {
+            reject(new Error(`${commandSummary} failed (code ${code}): ${stderr || stdout}`));
+          }
+        });
       });
-      const child = spawn(spawnInvocation.command, spawnInvocation.argv, {
-        // Keep mcporter and direct qmd commands on the same agent-scoped XDG state.
-        env: this.env,
-        cwd: this.workspaceDir,
-        shell: spawnInvocation.shell,
-        windowsHide: spawnInvocation.windowsHide,
-      });
-      let stdout = "";
-      let stderr = "";
-      let stdoutTruncated = false;
-      let stderrTruncated = false;
-      const timer = opts?.timeoutMs
-        ? setTimeout(() => {
-            child.kill("SIGKILL");
-            reject(new Error(`mcporter ${args.join(" ")} timed out after ${opts.timeoutMs}ms`));
-          }, opts.timeoutMs)
-        : null;
-      child.stdout.on("data", (data) => {
-        const next = appendOutputWithCap(stdout, data.toString("utf8"), this.maxQmdOutputChars);
-        stdout = next.text;
-        stdoutTruncated = stdoutTruncated || next.truncated;
-      });
-      child.stderr.on("data", (data) => {
-        const next = appendOutputWithCap(stderr, data.toString("utf8"), this.maxQmdOutputChars);
-        stderr = next.text;
-        stderrTruncated = stderrTruncated || next.truncated;
-      });
-      child.on("error", (err) => {
-        if (timer) {
-          clearTimeout(timer);
-        }
-        reject(err);
-      });
-      child.on("close", (code) => {
-        if (timer) {
-          clearTimeout(timer);
-        }
-        if (stdoutTruncated || stderrTruncated) {
-          reject(
-            new Error(
-              `mcporter ${args.join(" ")} produced too much output (limit ${this.maxQmdOutputChars} chars)`,
-            ),
-          );
-          return;
-        }
-        if (code === 0) {
-          resolve({ stdout, stderr });
-        } else {
-          reject(
-            new Error(`mcporter ${args.join(" ")} failed (code ${code}): ${stderr || stdout}`),
-          );
-        }
-      });
+
+    const primaryInvocation = resolveSpawnInvocation({
+      command: "mcporter",
+      args,
+      env: this.env,
+      packageName: "mcporter",
     });
+    try {
+      return await runWithInvocation(primaryInvocation);
+    } catch (err) {
+      if (!isWindowsCmdSpawnEinval(err, primaryInvocation.command)) {
+        throw err;
+      }
+      // Some Windows npm cmd shims can still throw EINVAL on spawn; retry through
+      // shell command resolution so PATH/PATHEXT can select a runnable entrypoint.
+      log.warn("mcporter.cmd spawn returned EINVAL on Windows; retrying with bare mcporter");
+      return await runWithInvocation({
+        command: "mcporter",
+        argv: args,
+        shell: true,
+        windowsHide: true,
+      });
+    }
   }
 
   private async runQmdSearchViaMcporter(params: {
@@ -1523,8 +1556,12 @@ export class QmdMemoryManager implements MemorySearchManager {
     }
     const { DatabaseSync } = requireNodeSqlite();
     this.db = new DatabaseSync(this.indexPath, { readOnly: true });
-    // Keep QMD recall responsive when the updater holds a write lock.
-    this.db.exec("PRAGMA busy_timeout = 1");
+    // busy_timeout is per-connection; set it on every open so concurrent
+    // processes retry instead of failing immediately with SQLITE_BUSY.
+    // Use a lower value than the write path (5 s) because this read-only
+    // connection runs synchronous queries on the main thread via DatabaseSync.
+    // In WAL mode readers rarely block, so 1 s is a safe upper bound.
+    this.db.exec("PRAGMA busy_timeout = 1000");
     return this.db;
   }
 
