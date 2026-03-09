@@ -1342,4 +1342,27 @@ describe("loadOpenClawPlugins", () => {
     );
     expect(resolved).toBe(srcFile);
   });
+
+  it("orders plugin-sdk subpath aliases before the root alias", () => {
+    const { root, distFile } = createPluginSdkAliasFixture({
+      srcFile: "root-alias.cjs",
+      distFile: "root-alias.cjs",
+      srcBody: "module.exports = {};\n",
+      distBody: "module.exports = {};\n",
+    });
+    const distDiscord = path.join(root, "dist", "plugin-sdk", "discord.js");
+    fs.mkdirSync(path.dirname(distDiscord), { recursive: true });
+    fs.writeFileSync(distDiscord, "export {};\n", "utf-8");
+
+    const aliasMap = __testing.buildPluginSdkAliasMap(path.join(root, "dist", "plugins", "loader.js"));
+    const keys = Object.keys(aliasMap);
+    const subpathIndex = keys.indexOf("openclaw/plugin-sdk/discord");
+    const rootIndex = keys.indexOf("openclaw/plugin-sdk");
+
+    expect(aliasMap["openclaw/plugin-sdk/discord"]).toBe(distDiscord);
+    expect(aliasMap["openclaw/plugin-sdk"]).toBe(distFile);
+    expect(subpathIndex).toBeGreaterThanOrEqual(0);
+    expect(rootIndex).toBeGreaterThanOrEqual(0);
+    expect(subpathIndex).toBeLessThan(rootIndex);
+  });
 });

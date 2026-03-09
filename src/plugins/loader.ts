@@ -85,8 +85,12 @@ const resolvePluginSdkAliasFile = (params: {
   return null;
 };
 
-const resolvePluginSdkAlias = (): string | null =>
-  resolvePluginSdkAliasFile({ srcFile: "root-alias.cjs", distFile: "root-alias.cjs" });
+const resolvePluginSdkAlias = (modulePath?: string): string | null =>
+  resolvePluginSdkAliasFile({
+    srcFile: "root-alias.cjs",
+    distFile: "root-alias.cjs",
+    modulePath,
+  });
 
 const pluginSdkScopedAliasEntries = [
   { subpath: "core", srcFile: "core.ts", distFile: "core.js" },
@@ -178,12 +182,13 @@ const pluginSdkScopedAliasEntries = [
   },
 ] as const;
 
-const resolvePluginSdkScopedAliasMap = (): Record<string, string> => {
+const resolvePluginSdkScopedAliasMap = (modulePath?: string): Record<string, string> => {
   const aliasMap: Record<string, string> = {};
   for (const entry of pluginSdkScopedAliasEntries) {
     const resolved = resolvePluginSdkAliasFile({
       srcFile: entry.srcFile,
       distFile: entry.distFile,
+      modulePath,
     });
     if (resolved) {
       aliasMap[`openclaw/plugin-sdk/${entry.subpath}`] = resolved;
@@ -192,8 +197,16 @@ const resolvePluginSdkScopedAliasMap = (): Record<string, string> => {
   return aliasMap;
 };
 
+function buildPluginSdkAliasMap(modulePath?: string): Record<string, string> {
+  const scopedAliases = resolvePluginSdkScopedAliasMap(modulePath);
+  const rootAlias = resolvePluginSdkAlias(modulePath);
+  // Keep scoped aliases first so Jiti doesn't resolve subpaths through the root alias.
+  return rootAlias ? { ...scopedAliases, "openclaw/plugin-sdk": rootAlias } : scopedAliases;
+}
+
 export const __testing = {
   resolvePluginSdkAliasFile,
+  buildPluginSdkAliasMap,
 };
 
 function buildCacheKey(params: {
@@ -572,11 +585,7 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
     if (jitiLoader) {
       return jitiLoader;
     }
-    const pluginSdkAlias = resolvePluginSdkAlias();
-    const aliasMap = {
-      ...(pluginSdkAlias ? { "openclaw/plugin-sdk": pluginSdkAlias } : {}),
-      ...resolvePluginSdkScopedAliasMap(),
-    };
+    const aliasMap = buildPluginSdkAliasMap();
     jitiLoader = createJiti(import.meta.url, {
       interopDefault: true,
       extensions: [".ts", ".tsx", ".mts", ".cts", ".mtsx", ".ctsx", ".js", ".mjs", ".cjs", ".json"],
