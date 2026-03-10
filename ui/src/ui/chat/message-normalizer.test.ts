@@ -121,6 +121,16 @@ describe("message-normalizer", () => {
 
       expect(result.senderLabel).toBe("Iris");
     });
+
+    it("strips injected metadata blocks even on non-user messages", () => {
+      const result = normalizeMessage({
+        role: "assistant",
+        content:
+          'Sender (untrusted metadata):\n```json\n{"label":"openclaw-control-ui"}\n```\n\nActual assistant text',
+      });
+
+      expect(result.content).toEqual([{ type: "text", text: "Actual assistant text" }]);
+    });
   });
 
   describe("normalizeRoleForGrouping", () => {

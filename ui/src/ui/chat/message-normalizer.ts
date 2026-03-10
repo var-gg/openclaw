@@ -53,15 +53,15 @@ export function normalizeMessage(message: unknown): NormalizedMessage {
   const senderLabel =
     typeof m.senderLabel === "string" && m.senderLabel.trim() ? m.senderLabel.trim() : null;
 
-  // Strip AI-injected metadata prefix blocks from user messages before display.
-  if (role === "user" || role === "User") {
-    content = content.map((item) => {
-      if (item.type === "text" && typeof item.text === "string") {
-        return { ...item, text: stripInboundMetadata(item.text) };
-      }
-      return item;
-    });
-  }
+  // Strip AI-injected metadata blocks defensively before display.
+  // User messages are the main source, but internal/tool/UI regressions can
+  // occasionally surface the same wrappers on non-user messages too.
+  content = content.map((item) => {
+    if (item.type === "text" && typeof item.text === "string") {
+      return { ...item, text: stripInboundMetadata(item.text) };
+    }
+    return item;
+  });
 
   return { role, content, timestamp, id, senderLabel };
 }
