@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { normalizeAgentId } from "../../routing/session-key.js";
 import { normalizeLegacyDeliveryInput } from "../legacy-delivery.js";
 import { parseAbsoluteTimeMs } from "../parse.js";
 import { migrateLegacyCronPayload } from "../payload-migration.js";
@@ -187,8 +188,8 @@ export async function ensureLoaded(
   const jobs = (loaded.jobs ?? []) as unknown as Array<Record<string, unknown>>;
   let mutated = false;
   for (const raw of jobs) {
-    const state = raw.state;
-    if (!state || typeof state !== "object" || Array.isArray(state)) {
+    const jobState = raw.state;
+    if (!jobState || typeof jobState !== "object" || Array.isArray(jobState)) {
       raw.state = {};
       mutated = true;
     }
@@ -463,6 +464,23 @@ export async function ensureLoaded(
       }
     } else if (normalizedLegacy.mutated && normalizedLegacy.delivery) {
       raw.delivery = normalizedLegacy.delivery;
+      mutated = true;
+    }
+
+    const rawAgentId = typeof raw.agentId === "string" ? raw.agentId : undefined;
+    const normalizedAgentId = normalizeAgentId(rawAgentId);
+    const normalizedDefaultAgentId = normalizeAgentId(state.deps.defaultAgentId);
+    if (sessionTarget === "main" && rawAgentId && normalizedAgentId !== normalizedDefaultAgentId) {
+      raw.enabled = false;
+      raw.state = {
+        ...(raw.state && typeof raw.state === "object" && !Array.isArray(raw.state)
+          ? (raw.state as Record<string, unknown>)
+          : {}),
+        lastStatus: "skipped",
+        lastRunStatus: "skipped",
+        lastError:
+          `Disabled legacy invalid cron job during load: sessionTarget \"main\" is only valid for the default agent (agentId: ${rawAgentId}). Recreate as sessionTarget \"isolated\" with payload.kind \"agentTurn\".`,
+      };
       mutated = true;
     }
   }

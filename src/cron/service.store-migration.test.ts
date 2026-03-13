@@ -182,4 +182,46 @@ describe("CronService store migrations", () => {
 
     await stopCronAndCleanup(cron, store);
   });
+
+  it("disables legacy main-session jobs bound to a non-default agent during load", async () => {
+    const { store, cron } = await startCronWithStoredJobs([
+      {
+        id: "legacy-invalid-main-agent-job",
+        name: "legacy invalid main agent",
+        enabled: true,
+        createdAtMs: Date.parse("2026-02-01T12:00:00.000Z"),
+        updatedAtMs: Date.parse("2026-02-05T12:00:00.000Z"),
+        schedule: { kind: "cron", expr: "*/20 * * * *", tz: "UTC" },
+        sessionTarget: "main",
+        wakeMode: "now",
+        payload: { kind: "systemEvent", text: "tick" },
+        agentId: "agent_trade_exec",
+        sessionKey: "agent:agent_trade_exec:discord:channel:123",
+        state: {},
+      },
+    ]);
+
+    const job = await listJobById(cron, "legacy-invalid-main-agent-job");
+    expect(job).toBeDefined();
+    expect(job?.enabled).toBe(false);
+    expect(job?.sessionTarget).toBe("main");
+    expect(job?.agentId).toBe("agent_trade_exec");
+    expect(job?.state.lastStatus).toBe("skipped");
+    expect(job?.state.lastRunStatus).toBe("skipped");
+    expect(job?.state.lastError).toContain('sessionTarget "main" is only valid for the default agent');
+
+    const persisted = JSON.parse(await fs.readFile(store.storePath, "utf-8")) as {
+      jobs: Array<Record<string, unknown>>;
+    };
+    const persistedJob = persisted.jobs.find((entry) => entry.id === "legacy-invalid-main-agent-job");
+    expect(persistedJob).toBeDefined();
+    expect(persistedJob?.enabled).toBe(false);
+    const persistedState =
+      persistedJob?.state && typeof persistedJob.state === "object"
+        ? (persistedJob.state as Record<string, unknown>)
+        : null;
+    expect(persistedState?.lastError).toBeTypeOf("string");
+
+    await stopCronAndCleanup(cron, store);
+  });
 });
