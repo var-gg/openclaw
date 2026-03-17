@@ -922,8 +922,9 @@ export async function startGatewayServer(
       });
 
   let browserControl: Awaited<ReturnType<typeof startBrowserControlServerIfEnabled>> = null;
+  let agentChannelActivityMonitor: { stop: () => Promise<void> } | null = null;
   if (!minimalTestGateway) {
-    ({ browserControl, pluginServices } = await startGatewaySidecars({
+    ({ browserControl, pluginServices, agentChannelActivityMonitor } = await startGatewaySidecars({
       cfg: cfgAtStart,
       pluginRegistry,
       defaultWorkspaceDir,
@@ -1019,6 +1020,7 @@ export async function startGatewayServer(
     canvasHostServer,
     stopChannel,
     pluginServices,
+    agentChannelActivityMonitor,
     cron,
     heartbeatRunner,
     updateCheckStop: stopGatewayUpdateCheck,

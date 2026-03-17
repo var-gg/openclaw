@@ -930,6 +930,54 @@ Default slash command settings:
 
   </Accordion>
 
+  <Accordion title="Agent activity channel prefixes (v0)">
+    OpenClaw can mirror per-agent runtime lifecycle state into Discord channel names using a workspace config file.
+
+    Workspace config file:
+
+    - `ops/config/agent-channel-map.json`
+
+    Runtime state file:
+
+    - `ops/state/agent-activity.json`
+
+    Example:
+
+```json
+{
+  "version": 1,
+  "staleRunningMs": 21600000,
+  "agents": {
+    "main": {
+      "channelId": "123456789012345678",
+      "baseName": "main"
+    },
+    "research": {
+      "channelId": "234567890123456789",
+      "baseName": "research",
+      "accountId": "default"
+    }
+  }
+}
+```
+
+    Behavior in v0:
+
+    - `lifecycle:start` => `⚙️-<baseName>`
+    - `lifecycle:end` => `🟢-<baseName>`
+    - `lifecycle:error` => `🔴-<baseName>`
+    - end/error events are ignored when their `runId` does not match the agent's current active run
+    - the channel name is only patched when the synthesized target name changes
+    - if a run stays stuck in `running`, the monitor will eventually fall back to idle after `staleRunningMs`
+
+    Notes:
+
+    - `baseName` is canonical; OpenClaw always synthesizes the full channel name as `<emoji>-<baseName>`
+    - the monitor reads the workspace mapping file at runtime, so updating the JSON does not require code changes
+    - keep this limited to low-cardinality 1:1 agent-to-channel mappings to avoid unnecessary Discord API churn
+
+  </Accordion>
+
   <Accordion title="Exec approvals in Discord">
     Discord supports button-based exec approvals in DMs and can optionally post approval prompts in the originating channel.
 

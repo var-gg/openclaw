@@ -12,6 +12,7 @@ import { cleanStaleLockFiles } from "../agents/session-write-lock.js";
 import type { CliDeps } from "../cli/deps.js";
 import type { loadConfig } from "../config/config.js";
 import { resolveStateDir } from "../config/paths.js";
+import { startAgentChannelActivityMonitor } from "../discord/monitor/agent-channel-activity.js";
 import { startGmailWatcherWithLogs } from "../hooks/gmail-watcher-lifecycle.js";
 import {
   clearInternalHooks,
@@ -161,6 +162,15 @@ export async function startGatewaySidecars(params: {
     params.log.warn(`plugin services failed to start: ${String(err)}`);
   }
 
+  let agentChannelActivityMonitor: { stop: () => Promise<void> } | null = null;
+  try {
+    agentChannelActivityMonitor = await startAgentChannelActivityMonitor({
+      workspaceDir: params.defaultWorkspaceDir,
+    });
+  } catch (err) {
+    params.log.warn(`discord agent activity monitor failed to start: ${String(err)}`);
+  }
+
   if (params.cfg.acp?.enabled) {
     void getAcpSessionManager()
       .reconcilePendingSessionIdentities({ cfg: params.cfg })
@@ -187,5 +197,5 @@ export async function startGatewaySidecars(params: {
     }, 750);
   }
 
-  return { browserControl, pluginServices };
+  return { browserControl, pluginServices, agentChannelActivityMonitor };
 }
