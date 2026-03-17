@@ -103,4 +103,28 @@ describe("agent-events sequencing", () => {
 
     expect(receivedSessionKey).toBeUndefined();
   });
+
+  test("stores bus state on globalThis so split bundles share one listener set", async () => {
+    resetAgentRunContextForTest();
+
+    const globalState = globalThis as typeof globalThis & {
+      __openclawAgentEventsState?: {
+        seqByRun: Map<string, number>;
+        listeners: Set<(evt: unknown) => void>;
+        runContextById: Map<string, unknown>;
+      };
+    };
+
+    expect(globalState.__openclawAgentEventsState).toBeDefined();
+
+    const stop = onAgentEvent(() => {});
+    expect(globalState.__openclawAgentEventsState?.listeners.size).toBe(1);
+    stop();
+    expect(globalState.__openclawAgentEventsState?.listeners.size).toBe(0);
+
+    registerAgentRunContext("run-global", { sessionKey: "session-global" });
+    expect(globalState.__openclawAgentEventsState?.runContextById.get("run-global")).toEqual({
+      sessionKey: "session-global",
+    });
+  });
 });
