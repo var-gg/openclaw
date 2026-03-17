@@ -551,4 +551,89 @@ describe("agent channel activity monitor", () => {
     expect(renameChannel).toHaveBeenCalledTimes(1);
     expect(renameChannel.mock.calls.at(0)?.[0]).toEqual({ channelId: "123", name: "⚙️-main" });
   });
+
+  it("clears older root running runs when a new root run starts", async () => {
+    const workspaceDir = await makeWorkspace();
+    await writeMap(workspaceDir, {
+      version: 2,
+      channels: {
+        "agent:main:discord:channel:123": {
+          channelId: "123",
+          baseName: "main",
+        },
+      },
+    });
+
+    const statePath = path.join(workspaceDir, "ops", "state", "agent-activity.json");
+    await fs.mkdir(path.dirname(statePath), { recursive: true });
+    await fs.writeFile(
+      statePath,
+      `${JSON.stringify({
+        version: 2,
+        staleRunningMs: 21600000,
+        channels: {
+          "agent:main:discord:channel:123": {
+            state: "running",
+            updatedAt: 1000,
+            runs: {
+              "zombie-1": {
+                sessionKey: "agent:main:discord:channel:123",
+                status: "running",
+                startedAt: 1000,
+                updatedAt: 1000,
+              },
+              "zombie-2": {
+                sessionKey: "agent:main:discord:channel:123",
+                status: "running",
+                startedAt: 1100,
+                updatedAt: 1100,
+              },
+            },
+            lastTargetName: "⚙️-main",
+            lastAppliedAt: 1000,
+          },
+        },
+      }, null, 2)}\n`,
+      "utf8",
+    );
+
+    let currentName = "⚙️-main";
+    const renameChannel = vi.fn(async ({ name }: { channelId: string; name: string; accountId?: string }) => {
+      currentName = name;
+    });
+    const fetchChannel = vi.fn(async () => ({ name: currentName }));
+    let now = 2000;
+    const monitor = new AgentChannelActivityMonitor({
+      workspaceDir,
+      renameChannel,
+      fetchChannel,
+      now: () => now,
+      staleSweepIntervalMs: 60_000,
+    });
+    await monitor.start();
+
+    emitAgentEvent({
+      runId: "fresh-run",
+      stream: "lifecycle",
+      sessionKey: "agent:main:discord:channel:123",
+      data: { phase: "start" },
+    });
+    now = 3000;
+    emitAgentEvent({
+      runId: "fresh-run",
+      stream: "lifecycle",
+      sessionKey: "agent:main:discord:channel:123",
+      data: { phase: "end" },
+    });
+    await monitor.stop();
+
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      channels: Record<string, { state: string; runs: Record<string, { status: string }> }>;
+    };
+    expect(state.channels["agent:main:discord:channel:123"]?.state).toBe("idle");
+    expect(Object.keys(state.channels["agent:main:discord:channel:123"]?.runs ?? {})).toEqual(["fresh-run"]);
+    expect(state.channels["agent:main:discord:channel:123"]?.runs?.["fresh-run"]?.status).toBe("ok");
+    expect(renameChannel).toHaveBeenCalledTimes(1);
+    expect(renameChannel.mock.calls.at(0)?.[0]).toEqual({ channelId: "123", name: "🟢-main" });
+  });
 });

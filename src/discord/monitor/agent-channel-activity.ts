@@ -493,8 +493,8 @@ export class AgentChannelActivityMonitor {
     const runs = { ...(current.runs ?? {}) };
 
     if (phase === "start" && rootSessionKey === extractDiscordChannelRootSessionKey(evt.sessionKey)) {
-      for (const [runId, run] of Object.entries(runs)) {
-        if (run.status !== "running") {
+      for (const runId of Object.keys(runs)) {
+        if (runId !== evt.runId) {
           delete runs[runId];
         }
       }
