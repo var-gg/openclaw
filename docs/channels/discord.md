@@ -930,8 +930,8 @@ Default slash command settings:
 
   </Accordion>
 
-  <Accordion title="Agent activity channel prefixes (v0)">
-    OpenClaw can mirror per-agent runtime lifecycle state into Discord channel names using a workspace config file.
+  <Accordion title="Agent activity channel prefixes (channel-session/task-tree v1)">
+    OpenClaw can mirror Discord channel session activity into Discord channel names using a workspace config file.
 
     Workspace config file:
 
@@ -945,36 +945,40 @@ Default slash command settings:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "staleRunningMs": 21600000,
-  "agents": {
-    "main": {
+  "channels": {
+    "agent:main:discord:channel:123456789012345678": {
       "channelId": "123456789012345678",
-      "baseName": "main"
+      "baseName": "vargg-growth"
     },
-    "research": {
+    "agent:main:discord:channel:234567890123456789": {
       "channelId": "234567890123456789",
-      "baseName": "research",
+      "baseName": "chief-of-staff",
       "accountId": "default"
     }
   }
 }
 ```
 
-    Behavior in v0:
+    Behavior in v1:
 
-    - `lifecycle:start` => `⚙️-<baseName>`
-    - `lifecycle:end` => `🟢-<baseName>`
-    - `lifecycle:error` => `🔴-<baseName>`
-    - end/error events are ignored when their `runId` does not match the agent's current active run
-    - the channel name is only patched when the synthesized target name changes
-    - if a run stays stuck in `running`, the monitor will eventually fall back to idle after `staleRunningMs`
+    - A mapped Discord **channel root session key** is the unit of tracking, not the top-level agent id.
+    - `lifecycle:start` on the root session (or descendant work spawned from it) marks the channel tree active.
+    - Active tree with no failures => `⚙️-<baseName>`
+    - Tree complete with no failures => `🟢-<baseName>`
+    - Any tracked run in the tree ending with error => `🔴-<baseName>`
+    - Child work is attached by walking `spawnedBy` ancestry in the session store until a mapped Discord channel root is found.
+    - Discord thread session keys like `agent:main:discord:channel:<channelId>:thread:<threadId>` collapse to the parent channel root `agent:main:discord:channel:<channelId>`.
+    - The channel name is only patched when the synthesized target name changes.
+    - If tracked runs stay stuck in `running`, the monitor eventually falls them back to idle after `staleRunningMs`.
 
-    Notes:
+    Notes / tradeoffs:
 
-    - `baseName` is canonical; OpenClaw always synthesizes the full channel name as `<emoji>-<baseName>`
-    - the monitor reads the workspace mapping file at runtime, so updating the JSON does not require code changes
-    - keep this limited to low-cardinality 1:1 agent-to-channel mappings to avoid unnecessary Discord API churn
+    - `baseName` is canonical; OpenClaw always synthesizes the full channel name as `<emoji>-<baseName>`.
+    - This covers the common workflow where a Discord channel session spawns subagents / ACP / child runs that persist `spawnedBy` in the session store.
+    - If some exotic child workflow never records `spawnedBy` ancestry or never emits lifecycle events, it cannot be attached to the parent tree by this monitor.
+    - The monitor still accepts the older `agents` config shape as a compatibility fallback, but new configs should use `channels`.
 
   </Accordion>
 

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { emitAgentEvent } from "../../infra/agent-events.js";
+import type { OpenClawConfig } from "../../config/config.js";
 import {
   AgentChannelActivityMonitor,
   __test__,
@@ -26,8 +27,25 @@ async function readState(workspaceDir: string) {
   return JSON.parse(await fs.readFile(filePath, "utf8")) as {
     version: number;
     staleRunningMs: number;
-    agents: Record<string, Record<string, unknown>>;
+    channels: Record<string, Record<string, unknown>>;
   };
+}
+
+async function writeSessionStore(workspaceDir: string, store: Record<string, unknown>) {
+  const filePath = path.join(workspaceDir, ".openclaw-state", "agents", "main", "sessions", "sessions.json");
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+}
+
+function makeCfg(workspaceDir: string): OpenClawConfig {
+  return {
+    session: {
+      store: path.join(workspaceDir, ".openclaw-state", "agents", "{agentId}", "sessions", "sessions.json"),
+    },
+    agents: {
+      main: {},
+    },
+  } as OpenClawConfig;
 }
 
 describe("agent channel activity monitor", () => {
@@ -41,14 +59,23 @@ describe("agent channel activity monitor", () => {
     expect(__test__.synthesizeChannelName("main", "error")).toBe("🔴-main");
   });
 
-  it("renames mapped channels on start/end/error and ignores stale run completions", async () => {
+  it("detects discord channel root keys from channel and thread sessions", () => {
+    expect(__test__.extractDiscordChannelRootSessionKey("agent:main:discord:channel:123")).toBe(
+      "agent:main:discord:channel:123",
+    );
+    expect(
+      __test__.extractDiscordChannelRootSessionKey("agent:main:discord:channel:123:thread:999"),
+    ).toBe("agent:main:discord:channel:123");
+  });
+
+  it("tracks mapped root channel sessions directly and only renames on target change", async () => {
     const workspaceDir = await makeWorkspace();
     await writeMap(workspaceDir, {
-      version: 1,
-      agents: {
-        main: {
+      version: 2,
+      channels: {
+        "agent:main:discord:channel:123": {
           channelId: "123",
-          baseName: "main",
+          baseName: "vargg-growth",
         },
       },
     });
@@ -71,50 +98,117 @@ describe("agent channel activity monitor", () => {
       sessionKey: "agent:main:discord:channel:123",
       data: { phase: "start" },
     });
-    await monitor.stop();
-
-    expect(renameChannel).toHaveBeenCalledTimes(1);
-    expect(renameChannel).toHaveBeenLastCalledWith({ channelId: "123", name: "⚙️-main" });
-
-    const monitor2 = new AgentChannelActivityMonitor({
-      workspaceDir,
-      renameChannel,
-      now: () => (now += 100),
-      staleSweepIntervalMs: 60_000,
-    });
-    await monitor2.start();
-
     emitAgentEvent({
-      runId: "run-0",
+      runId: "run-1",
       stream: "lifecycle",
       sessionKey: "agent:main:discord:channel:123",
-      data: { phase: "end" },
+      data: { phase: "start" },
     });
     emitAgentEvent({
       runId: "run-1",
       stream: "lifecycle",
       sessionKey: "agent:main:discord:channel:123",
-      data: { phase: "error", error: "boom" },
+      data: { phase: "end" },
     });
-    await monitor2.stop();
+    await monitor.stop();
 
     expect(renameChannel).toHaveBeenCalledTimes(2);
-    expect(renameChannel).toHaveBeenLastCalledWith({ channelId: "123", name: "🔴-main" });
+    expect(renameChannel.mock.calls.at(0)?.[0]).toEqual({ channelId: "123", name: "⚙️-vargg-growth" });
+    expect(renameChannel.mock.calls.at(1)?.[0]).toEqual({ channelId: "123", name: "🟢-vargg-growth" });
 
     const state = await readState(workspaceDir);
-    expect(state.agents.main?.state).toBe("error");
-    expect(state.agents.main?.activeRunId).toBeUndefined();
-    expect(state.agents.main?.lastError).toBe("boom");
+    expect(state.channels["agent:main:discord:channel:123"]?.state).toBe("idle");
   });
 
-  it("avoids duplicate Discord writes when the target name is unchanged", async () => {
+  it("keeps parent channel running until spawned child work completes and surfaces child errors", async () => {
     const workspaceDir = await makeWorkspace();
     await writeMap(workspaceDir, {
-      agents: {
-        main: {
+      version: 2,
+      channels: {
+        "agent:main:discord:channel:123": {
           channelId: "123",
-          baseName: "main",
+          baseName: "chief-of-staff",
         },
+      },
+    });
+    await writeSessionStore(workspaceDir, {
+      "agent:main:discord:channel:123": {
+        sessionId: "root",
+        updatedAt: 1,
+      },
+      "agent:main:subagent:child": {
+        sessionId: "child",
+        updatedAt: 2,
+        spawnedBy: "agent:main:discord:channel:123",
+      },
+    });
+
+    let now = 5_000;
+    const renameChannel = vi.fn(
+      async (_params: { channelId: string; name: string; accountId?: string }) => {},
+    );
+    const monitor = new AgentChannelActivityMonitor({
+      workspaceDir,
+      cfg: makeCfg(workspaceDir),
+      renameChannel,
+      now: () => now,
+      staleSweepIntervalMs: 60_000,
+    });
+    await monitor.start();
+
+    emitAgentEvent({
+      runId: "root-run",
+      stream: "lifecycle",
+      sessionKey: "agent:main:discord:channel:123",
+      data: { phase: "start" },
+    });
+    now += 10;
+    emitAgentEvent({
+      runId: "child-run",
+      stream: "lifecycle",
+      sessionKey: "agent:main:subagent:child",
+      data: { phase: "start" },
+    });
+    now += 10;
+    emitAgentEvent({
+      runId: "root-run",
+      stream: "lifecycle",
+      sessionKey: "agent:main:discord:channel:123",
+      data: { phase: "end" },
+    });
+    now += 10;
+    emitAgentEvent({
+      runId: "child-run",
+      stream: "lifecycle",
+      sessionKey: "agent:main:subagent:child",
+      data: { phase: "error", error: "boom" },
+    });
+    await monitor.stop();
+
+    expect(renameChannel).toHaveBeenCalledTimes(2);
+    expect(renameChannel.mock.calls.at(0)?.[0]).toEqual({ channelId: "123", name: "⚙️-chief-of-staff" });
+    expect(renameChannel.mock.calls.at(1)?.[0]).toEqual({ channelId: "123", name: "🔴-chief-of-staff" });
+
+    const state = await readState(workspaceDir);
+    expect(state.channels["agent:main:discord:channel:123"]?.state).toBe("error");
+  });
+
+  it("ignores orphan child completions whose run never started under a tracked tree", async () => {
+    const workspaceDir = await makeWorkspace();
+    await writeMap(workspaceDir, {
+      version: 2,
+      channels: {
+        "agent:main:discord:channel:123": {
+          channelId: "123",
+          baseName: "vargg-growth",
+        },
+      },
+    });
+    await writeSessionStore(workspaceDir, {
+      "agent:main:subagent:child": {
+        sessionId: "child",
+        updatedAt: 2,
+        spawnedBy: "agent:main:discord:channel:123",
       },
     });
 
@@ -123,6 +217,7 @@ describe("agent channel activity monitor", () => {
     );
     const monitor = new AgentChannelActivityMonitor({
       workspaceDir,
+      cfg: makeCfg(workspaceDir),
       renameChannel,
       now: () => Date.now(),
       staleSweepIntervalMs: 60_000,
@@ -130,28 +225,22 @@ describe("agent channel activity monitor", () => {
     await monitor.start();
 
     emitAgentEvent({
-      runId: "run-1",
+      runId: "child-run",
       stream: "lifecycle",
-      sessionKey: "agent:main:discord:channel:123",
-      data: { phase: "start" },
-    });
-    emitAgentEvent({
-      runId: "run-1",
-      stream: "lifecycle",
-      sessionKey: "agent:main:discord:channel:123",
-      data: { phase: "start" },
+      sessionKey: "agent:main:subagent:child",
+      data: { phase: "end" },
     });
     await monitor.stop();
 
-    expect(renameChannel).toHaveBeenCalledTimes(1);
+    expect(renameChannel).toHaveBeenCalledTimes(0);
   });
 
-  it("recovers stale running agents back to idle conservatively", async () => {
+  it("recovers stale running channels back to idle conservatively", async () => {
     const workspaceDir = await makeWorkspace();
     await writeMap(workspaceDir, {
       staleRunningMs: 1_000,
-      agents: {
-        main: {
+      channels: {
+        "agent:main:discord:channel:123": {
           channelId: "123",
           baseName: "main",
         },
@@ -193,7 +282,24 @@ describe("agent channel activity monitor", () => {
     expect(renameChannel.mock.calls.at(1)?.[0]).toEqual({ channelId: "123", name: "🟢-main" });
 
     const state = await readState(workspaceDir);
-    expect(state.agents.main?.state).toBe("idle");
-    expect(state.agents.main?.activeRunId).toBeUndefined();
+    expect(state.channels["agent:main:discord:channel:123"]?.state).toBe("idle");
+  });
+
+  it("accepts legacy agent keyed config and maps it to channel roots", () => {
+    const normalized = __test__.normalizeMap({
+      version: 1,
+      agents: {
+        main: {
+          channelId: "123",
+          baseName: "legacy-main",
+        },
+      },
+    });
+    expect(normalized.channels).toEqual({
+      "agent:main:discord:channel:123": {
+        channelId: "123",
+        baseName: "legacy-main",
+      },
+    });
   });
 });

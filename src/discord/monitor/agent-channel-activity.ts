@@ -1,41 +1,53 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { OpenClawConfig } from "../../config/config.js";
+import type { SessionEntry } from "../../config/sessions/types.js";
 import type { AgentEventPayload } from "../../infra/agent-events.js";
 import { onAgentEvent } from "../../infra/agent-events.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { resolveThreadParentSessionKey } from "../../sessions/session-key-utils.js";
+import { loadCombinedSessionStoreForGateway } from "../../gateway/session-utils.js";
 import { editChannelDiscord } from "../send.js";
 
 const log = createSubsystemLogger("discord-agent-activity");
 
 export type AgentActivityState = "idle" | "running" | "error";
 
-type AgentChannelMapEntry = {
+type ChannelMapEntry = {
   channelId: string;
   baseName: string;
   accountId?: string;
 };
 
-type AgentChannelMap = {
+type ChannelMap = {
   version?: number;
   staleRunningMs?: number;
-  agents?: Record<string, AgentChannelMapEntry>;
+  channels?: Record<string, ChannelMapEntry>;
 };
 
-type PersistedAgentRecord = {
+type PersistedRunRecord = {
+  sessionKey?: string;
+  status: "running" | "ok" | "error";
+  startedAt: number;
+  updatedAt: number;
+  lastError?: string;
+};
+
+type PersistedChannelRecord = {
   state: AgentActivityState;
-  activeRunId?: string;
   updatedAt: number;
   lastEventAt?: number;
   lastStartAt?: number;
   lastTargetName?: string;
   lastAppliedAt?: number;
   lastError?: string;
+  runs?: Record<string, PersistedRunRecord>;
 };
 
 type PersistedAgentActivityState = {
-  version: 1;
+  version: 2;
   staleRunningMs: number;
-  agents: Record<string, PersistedAgentRecord>;
+  channels: Record<string, PersistedChannelRecord>;
 };
 
 type DiscordChannelRenameFn = (params: {
@@ -46,6 +58,7 @@ type DiscordChannelRenameFn = (params: {
 
 type AgentChannelActivityMonitorOptions = {
   workspaceDir: string;
+  cfg?: OpenClawConfig;
   renameChannel?: DiscordChannelRenameFn;
   now?: () => number;
   staleSweepIntervalMs?: number;
@@ -66,24 +79,45 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function normalizeMap(raw: unknown): AgentChannelMap {
+function normalizeChannelMapEntry(value: unknown): ChannelMapEntry | null {
+  if (!isObject(value)) {
+    return null;
+  }
+  const channelId = typeof value.channelId === "string" ? value.channelId.trim() : "";
+  const baseName = typeof value.baseName === "string" ? value.baseName.trim() : "";
+  const accountId = typeof value.accountId === "string" && value.accountId.trim() ? value.accountId.trim() : undefined;
+  if (!channelId || !baseName) {
+    return null;
+  }
+  return { channelId, baseName, ...(accountId ? { accountId } : {}) };
+}
+
+function normalizeMap(raw: unknown): ChannelMap {
   if (!isObject(raw)) {
     return {};
   }
-  const agentsRaw = isObject(raw.agents) ? raw.agents : {};
-  const agents: Record<string, AgentChannelMapEntry> = {};
-  for (const [agentId, value] of Object.entries(agentsRaw)) {
-    if (!isObject(value)) {
+
+  const channels: Record<string, ChannelMapEntry> = {};
+  const channelsRaw = isObject(raw.channels) ? raw.channels : {};
+  for (const [rootKey, value] of Object.entries(channelsRaw)) {
+    const normalized = normalizeChannelMapEntry(value);
+    const normalizedRootKey = normalizeSessionKey(rootKey);
+    if (!normalized || !normalizedRootKey) {
       continue;
     }
-    const channelId = typeof value.channelId === "string" ? value.channelId.trim() : "";
-    const baseName = typeof value.baseName === "string" ? value.baseName.trim() : "";
-    const accountId = typeof value.accountId === "string" && value.accountId.trim() ? value.accountId.trim() : undefined;
-    if (!channelId || !baseName) {
-      continue;
-    }
-    agents[agentId] = { channelId, baseName, ...(accountId ? { accountId } : {}) };
+    channels[normalizedRootKey] = normalized;
   }
+
+  // Backward compatibility with v0 agent-keyed config.
+  const agentsRaw = isObject(raw.agents) ? raw.agents : {};
+  for (const [agentId, value] of Object.entries(agentsRaw)) {
+    const normalized = normalizeChannelMapEntry(value);
+    if (!normalized) {
+      continue;
+    }
+    channels[`agent:${agentId.trim().toLowerCase()}:discord:channel:${normalized.channelId}`] = normalized;
+  }
+
   const staleRunningMs =
     typeof raw.staleRunningMs === "number" && Number.isFinite(raw.staleRunningMs) && raw.staleRunningMs > 0
       ? Math.floor(raw.staleRunningMs)
@@ -91,42 +125,94 @@ function normalizeMap(raw: unknown): AgentChannelMap {
   return {
     version: typeof raw.version === "number" ? raw.version : undefined,
     ...(staleRunningMs ? { staleRunningMs } : {}),
-    agents,
+    channels,
+  };
+}
+
+function normalizeRunRecord(value: unknown): PersistedRunRecord | null {
+  if (!isObject(value)) {
+    return null;
+  }
+  const status = value.status;
+  if (status !== "running" && status !== "ok" && status !== "error") {
+    return null;
+  }
+  const startedAt = typeof value.startedAt === "number" ? value.startedAt : undefined;
+  const updatedAt = typeof value.updatedAt === "number" ? value.updatedAt : undefined;
+  if (startedAt === undefined || updatedAt === undefined) {
+    return null;
+  }
+  return {
+    status,
+    startedAt,
+    updatedAt,
+    ...(typeof value.sessionKey === "string" && value.sessionKey.trim() ? { sessionKey: value.sessionKey.trim().toLowerCase() } : {}),
+    ...(typeof value.lastError === "string" && value.lastError.trim() ? { lastError: value.lastError.trim() } : {}),
+  };
+}
+
+function normalizeChannelRecord(value: unknown): PersistedChannelRecord | null {
+  if (!isObject(value)) {
+    return null;
+  }
+  const state = value.state;
+  if (state !== "idle" && state !== "running" && state !== "error") {
+    return null;
+  }
+  const updatedAt = typeof value.updatedAt === "number" ? value.updatedAt : Date.now();
+  const runsRaw = isObject(value.runs) ? value.runs : {};
+  const runs: Record<string, PersistedRunRecord> = {};
+  for (const [runId, runValue] of Object.entries(runsRaw)) {
+    const normalizedRun = normalizeRunRecord(runValue);
+    if (normalizedRun) {
+      runs[runId] = normalizedRun;
+    }
+  }
+  return {
+    state,
+    updatedAt,
+    ...(typeof value.lastEventAt === "number" ? { lastEventAt: value.lastEventAt } : {}),
+    ...(typeof value.lastStartAt === "number" ? { lastStartAt: value.lastStartAt } : {}),
+    ...(typeof value.lastTargetName === "string" && value.lastTargetName ? { lastTargetName: value.lastTargetName } : {}),
+    ...(typeof value.lastAppliedAt === "number" ? { lastAppliedAt: value.lastAppliedAt } : {}),
+    ...(typeof value.lastError === "string" && value.lastError ? { lastError: value.lastError } : {}),
+    ...(Object.keys(runs).length > 0 ? { runs } : {}),
   };
 }
 
 function normalizeState(raw: unknown): PersistedAgentActivityState {
-  if (!isObject(raw) || !isObject(raw.agents)) {
-    return { version: 1, staleRunningMs: DEFAULT_STALE_RUNNING_MS, agents: {} };
+  if (!isObject(raw)) {
+    return { version: 2, staleRunningMs: DEFAULT_STALE_RUNNING_MS, channels: {} };
   }
-  const agents: Record<string, PersistedAgentRecord> = {};
-  for (const [agentId, value] of Object.entries(raw.agents)) {
-    if (!isObject(value)) {
-      continue;
+
+  const channels: Record<string, PersistedChannelRecord> = {};
+  const channelsRaw = isObject(raw.channels) ? raw.channels : {};
+  for (const [rootKey, value] of Object.entries(channelsRaw)) {
+    const normalizedKey = normalizeSessionKey(rootKey);
+    const normalizedValue = normalizeChannelRecord(value);
+    if (normalizedKey && normalizedValue) {
+      channels[normalizedKey] = normalizedValue;
     }
-    const state = value.state;
-    if (state !== "idle" && state !== "running" && state !== "error") {
-      continue;
-    }
-    const updatedAt = typeof value.updatedAt === "number" ? value.updatedAt : Date.now();
-    agents[agentId] = {
-      state,
-      updatedAt,
-      ...(typeof value.activeRunId === "string" && value.activeRunId ? { activeRunId: value.activeRunId } : {}),
-      ...(typeof value.lastEventAt === "number" ? { lastEventAt: value.lastEventAt } : {}),
-      ...(typeof value.lastStartAt === "number" ? { lastStartAt: value.lastStartAt } : {}),
-      ...(typeof value.lastTargetName === "string" && value.lastTargetName ? { lastTargetName: value.lastTargetName } : {}),
-      ...(typeof value.lastAppliedAt === "number" ? { lastAppliedAt: value.lastAppliedAt } : {}),
-      ...(typeof value.lastError === "string" && value.lastError ? { lastError: value.lastError } : {}),
-    };
   }
+
+  // Backward compatibility with v0 persisted state.
+  if (Object.keys(channels).length === 0 && isObject(raw.agents)) {
+    for (const [agentId, value] of Object.entries(raw.agents)) {
+      const normalizedValue = normalizeChannelRecord(value);
+      if (!normalizedValue) {
+        continue;
+      }
+      channels[`agent:${agentId.trim().toLowerCase()}:discord:channel:legacy`] = normalizedValue;
+    }
+  }
+
   return {
-    version: 1,
+    version: 2,
     staleRunningMs:
       typeof raw.staleRunningMs === "number" && Number.isFinite(raw.staleRunningMs) && raw.staleRunningMs > 0
         ? Math.floor(raw.staleRunningMs)
         : DEFAULT_STALE_RUNNING_MS,
-    agents,
+    channels,
   };
 }
 
@@ -151,8 +237,58 @@ function synthesizeChannelName(baseName: string, state: AgentActivityState) {
   return `${STATE_TO_EMOJI[state]}-${baseName}`;
 }
 
+function normalizeSessionKey(value: string | undefined | null): string | null {
+  const trimmed = (value ?? "").trim().toLowerCase();
+  return trimmed || null;
+}
+
+function isDiscordChannelRootSessionKey(sessionKey: string | undefined | null): boolean {
+  const normalized = normalizeSessionKey(sessionKey);
+  if (!normalized) {
+    return false;
+  }
+  return /^agent:[^:]+:discord:channel:[^:]+$/.test(normalized);
+}
+
+function extractDiscordChannelRootSessionKey(sessionKey: string | undefined | null): string | null {
+  const normalized = normalizeSessionKey(sessionKey);
+  if (!normalized) {
+    return null;
+  }
+  const parent = resolveThreadParentSessionKey(normalized);
+  if (isDiscordChannelRootSessionKey(parent)) {
+    return parent;
+  }
+  return isDiscordChannelRootSessionKey(normalized) ? normalized : null;
+}
+
+function extractDiscordChannelIdFromRootSessionKey(sessionKey: string | undefined | null): string | null {
+  const normalized = extractDiscordChannelRootSessionKey(sessionKey);
+  if (!normalized) {
+    return null;
+  }
+  return normalized.split(":").at(-1) ?? null;
+}
+
+function synthesizeRecordState(record: PersistedChannelRecord): AgentActivityState {
+  const runs = Object.values(record.runs ?? {});
+  if (runs.some((run) => run.status === "error")) {
+    return "error";
+  }
+  if (runs.some((run) => run.status === "running")) {
+    return "running";
+  }
+  return "idle";
+}
+
+function collectLatestError(runs: Record<string, PersistedRunRecord> | undefined): string | undefined {
+  const ordered = Object.values(runs ?? {}).sort((a, b) => b.updatedAt - a.updatedAt);
+  return ordered.find((run) => run.status === "error")?.lastError;
+}
+
 export class AgentChannelActivityMonitor {
   private readonly workspaceDir: string;
+  private readonly cfg?: OpenClawConfig;
   private readonly configPath: string;
   private readonly statePath: string;
   private readonly renameChannel: DiscordChannelRenameFn;
@@ -161,14 +297,15 @@ export class AgentChannelActivityMonitor {
   private unsub: (() => void) | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private state: PersistedAgentActivityState = {
-    version: 1,
+    version: 2,
     staleRunningMs: DEFAULT_STALE_RUNNING_MS,
-    agents: {},
+    channels: {},
   };
   private queue: Promise<void> = Promise.resolve();
 
   constructor(options: AgentChannelActivityMonitorOptions) {
     this.workspaceDir = options.workspaceDir;
+    this.cfg = options.cfg;
     this.configPath = path.join(options.workspaceDir, CONFIG_RELATIVE_PATH);
     this.statePath = path.join(options.workspaceDir, STATE_RELATIVE_PATH);
     this.renameChannel =
@@ -187,12 +324,12 @@ export class AgentChannelActivityMonitor {
       void this.enqueue(() => this.handleEvent(evt));
     });
     this.sweepTimer = setInterval(() => {
-      void this.enqueue(() => this.recoverStaleRunningAgents());
+      void this.enqueue(() => this.recoverStaleRunningChannels());
     }, this.staleSweepIntervalMs);
     if (typeof this.sweepTimer.unref === "function") {
       this.sweepTimer.unref();
     }
-    await this.enqueue(() => this.recoverStaleRunningAgents());
+    await this.enqueue(() => this.recoverStaleRunningChannels());
   }
 
   async stop() {
@@ -218,9 +355,47 @@ export class AgentChannelActivityMonitor {
     await writeJsonFile(this.statePath, this.state);
   }
 
-  private getAgentId(evt: AgentEventPayload): string | null {
-    const candidate = evt.sessionKey?.match(/^agent:([^:]+)/)?.[1]?.trim();
-    return candidate || null;
+  private loadSessionStore(): Record<string, SessionEntry> {
+    if (!this.cfg) {
+      return {};
+    }
+    try {
+      return loadCombinedSessionStoreForGateway(this.cfg).store;
+    } catch (err) {
+      log.warn(`failed to load session store for discord activity monitor: ${String(err)}`);
+      return {};
+    }
+  }
+
+  private resolveRootSessionKey(params: {
+    sessionKey?: string;
+    mappedRoots: Set<string>;
+    store: Record<string, SessionEntry>;
+  }): string | null {
+    const eventRoot = extractDiscordChannelRootSessionKey(params.sessionKey);
+    if (eventRoot && params.mappedRoots.has(eventRoot)) {
+      return eventRoot;
+    }
+
+    const normalizedSessionKey = normalizeSessionKey(params.sessionKey);
+    if (!normalizedSessionKey) {
+      return null;
+    }
+
+    const visited = new Set<string>();
+    let current: string | null = normalizedSessionKey;
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      const channelRoot = extractDiscordChannelRootSessionKey(current);
+      if (channelRoot && params.mappedRoots.has(channelRoot)) {
+        return channelRoot;
+      }
+      const entry = params.store[current];
+      const spawnedBy = normalizeSessionKey(entry?.spawnedBy);
+      current = spawnedBy ?? null;
+    }
+
+    return null;
   }
 
   private async handleEvent(evt: AgentEventPayload) {
@@ -231,60 +406,91 @@ export class AgentChannelActivityMonitor {
     if (phase !== "start" && phase !== "end" && phase !== "error") {
       return;
     }
-    const agentId = this.getAgentId(evt);
-    if (!agentId) {
+
+    const config = await this.readMap();
+    const mappedRoots = new Set(Object.keys(config.channels ?? {}));
+    if (mappedRoots.size === 0) {
       return;
     }
-    const config = await this.readMap();
-    const mapping = config.agents?.[agentId];
+
+    this.state.staleRunningMs = config.staleRunningMs ?? DEFAULT_STALE_RUNNING_MS;
+    const store = this.loadSessionStore();
+    const rootSessionKey = this.resolveRootSessionKey({
+      sessionKey: evt.sessionKey,
+      mappedRoots,
+      store,
+    });
+    if (!rootSessionKey) {
+      return;
+    }
+    const mapping = config.channels?.[rootSessionKey];
     if (!mapping) {
       return;
     }
-    this.state.staleRunningMs = config.staleRunningMs ?? DEFAULT_STALE_RUNNING_MS;
+
     const now = this.now();
-    const current = this.state.agents[agentId] ?? { state: "idle", updatedAt: now };
+    const current = this.state.channels[rootSessionKey] ?? { state: "idle", updatedAt: now, runs: {} };
+    const runs = { ...(current.runs ?? {}) };
 
+    if (phase === "start" && rootSessionKey === extractDiscordChannelRootSessionKey(evt.sessionKey)) {
+      for (const [runId, run] of Object.entries(runs)) {
+        if (run.status !== "running") {
+          delete runs[runId];
+        }
+      }
+    }
+
+    const previousRun = runs[evt.runId];
     if (phase === "start") {
-      const next: PersistedAgentRecord = {
-        ...current,
-        state: "running",
-        activeRunId: evt.runId,
+      runs[evt.runId] = {
+        sessionKey: normalizeSessionKey(evt.sessionKey) ?? previousRun?.sessionKey,
+        status: "running",
+        startedAt: previousRun?.startedAt ?? now,
         updatedAt: now,
-        lastEventAt: now,
-        lastStartAt: now,
       };
-      delete next.lastError;
-      await this.applyAgentState(agentId, mapping, next);
+    } else if (previousRun) {
+      runs[evt.runId] = {
+        ...previousRun,
+        status: phase === "error" ? "error" : "ok",
+        updatedAt: now,
+        ...(phase === "error" && typeof evt.data?.error === "string" && evt.data.error.trim()
+          ? { lastError: evt.data.error.trim() }
+          : {}),
+      };
+    } else {
+      // Ignore orphan completions that do not belong to an active tracked tree.
       return;
     }
 
-    if (current.activeRunId !== evt.runId) {
-      return;
-    }
-
-    const next: PersistedAgentRecord = {
+    const next: PersistedChannelRecord = {
       ...current,
-      state: phase === "error" ? "error" : "idle",
       updatedAt: now,
       lastEventAt: now,
-      ...(phase === "error" && typeof evt.data?.error === "string" && evt.data.error.trim()
-        ? { lastError: evt.data.error.trim() }
-        : {}),
+      ...(phase === "start" ? { lastStartAt: now } : {}),
+      runs,
+      state: current.state,
     };
-    delete next.activeRunId;
-    await this.applyAgentState(agentId, mapping, next);
+    next.state = synthesizeRecordState(next);
+    const latestError = collectLatestError(runs);
+    if (latestError) {
+      next.lastError = latestError;
+    } else {
+      delete next.lastError;
+    }
+
+    await this.applyChannelState(rootSessionKey, mapping, next);
   }
 
-  private async applyAgentState(
-    agentId: string,
-    mapping: AgentChannelMapEntry,
-    next: PersistedAgentRecord,
+  private async applyChannelState(
+    rootSessionKey: string,
+    mapping: ChannelMapEntry,
+    next: PersistedChannelRecord,
   ) {
     const targetName = synthesizeChannelName(mapping.baseName, next.state);
-    const previous = this.state.agents[agentId];
+    const previous = this.state.channels[rootSessionKey];
     const nameChanged = previous?.lastTargetName !== targetName;
 
-    this.state.agents[agentId] = {
+    this.state.channels[rootSessionKey] = {
       ...next,
       lastTargetName: targetName,
       ...(nameChanged ? { lastAppliedAt: this.now() } : { lastAppliedAt: previous?.lastAppliedAt }),
@@ -302,37 +508,57 @@ export class AgentChannelActivityMonitor {
         ...(mapping.accountId ? { accountId: mapping.accountId } : {}),
       });
     } catch (err) {
-      log.warn(`failed to rename Discord channel for agent ${agentId}: ${String(err)}`);
+      log.warn(`failed to rename Discord channel for root ${rootSessionKey}: ${String(err)}`);
     }
   }
 
-  private async recoverStaleRunningAgents() {
+  private async recoverStaleRunningChannels() {
     const config = await this.readMap();
     this.state.staleRunningMs = config.staleRunningMs ?? DEFAULT_STALE_RUNNING_MS;
     const cutoffMs = this.state.staleRunningMs;
     const now = this.now();
     let changed = false;
 
-    for (const [agentId, record] of Object.entries(this.state.agents)) {
-      if (record.state !== "running") {
-        continue;
-      }
-      const mapping = config.agents?.[agentId];
+    for (const [rootSessionKey, record] of Object.entries(this.state.channels)) {
+      const mapping = config.channels?.[rootSessionKey];
       if (!mapping) {
         continue;
       }
-      const lastStartAt = record.lastStartAt ?? record.lastEventAt ?? record.updatedAt;
-      if (now - lastStartAt < cutoffMs) {
+      const runs = { ...(record.runs ?? {}) };
+      let recoveredAny = false;
+      for (const [runId, run] of Object.entries(runs)) {
+        if (run.status !== "running") {
+          continue;
+        }
+        const lastTouchAt = run.updatedAt ?? run.startedAt;
+        if (now - lastTouchAt < cutoffMs) {
+          continue;
+        }
+        runs[runId] = {
+          ...run,
+          status: "ok",
+          updatedAt: now,
+        };
+        recoveredAny = true;
+      }
+      if (!recoveredAny) {
         continue;
       }
-      const recovered: PersistedAgentRecord = {
+      const next: PersistedChannelRecord = {
         ...record,
-        state: "idle",
         updatedAt: now,
         lastEventAt: now,
+        runs,
+        state: "idle",
       };
-      delete recovered.activeRunId;
-      await this.applyAgentState(agentId, mapping, recovered);
+      next.state = synthesizeRecordState(next);
+      const latestError = collectLatestError(runs);
+      if (latestError) {
+        next.lastError = latestError;
+      } else {
+        delete next.lastError;
+      }
+      await this.applyChannelState(rootSessionKey, mapping, next);
       changed = true;
     }
 
@@ -354,4 +580,7 @@ export const __test__ = {
   normalizeMap,
   normalizeState,
   synthesizeChannelName,
+  extractDiscordChannelRootSessionKey,
+  extractDiscordChannelIdFromRootSessionKey,
+  synthesizeRecordState,
 };

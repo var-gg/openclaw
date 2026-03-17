@@ -166,6 +166,7 @@ export async function startGatewaySidecars(params: {
   try {
     agentChannelActivityMonitor = await startAgentChannelActivityMonitor({
       workspaceDir: params.defaultWorkspaceDir,
+      cfg: params.cfg,
     });
   } catch (err) {
     params.log.warn(`discord agent activity monitor failed to start: ${String(err)}`);
