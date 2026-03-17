@@ -6,10 +6,14 @@ import { normalizeProviderId } from "./model-selection.js";
 
 const OPENAI_GPT_54_MODEL_ID = "gpt-5.4";
 const OPENAI_GPT_54_PRO_MODEL_ID = "gpt-5.4-pro";
+const OPENAI_GPT_54_MINI_MODEL_ID = "gpt-5.4-mini";
+const OPENAI_GPT_54_NANO_MODEL_ID = "gpt-5.4-nano";
 const OPENAI_GPT_54_CONTEXT_TOKENS = 1_050_000;
 const OPENAI_GPT_54_MAX_TOKENS = 128_000;
 const OPENAI_GPT_54_TEMPLATE_MODEL_IDS = ["gpt-5.2"] as const;
 const OPENAI_GPT_54_PRO_TEMPLATE_MODEL_IDS = ["gpt-5.2-pro", "gpt-5.2"] as const;
+const OPENAI_GPT_54_MINI_TEMPLATE_MODEL_IDS = ["gpt-5-mini"] as const;
+const OPENAI_GPT_54_NANO_TEMPLATE_MODEL_IDS = ["gpt-5-nano", "gpt-5-mini"] as const;
 
 const OPENAI_CODEX_GPT_54_MODEL_ID = "gpt-5.4";
 const OPENAI_CODEX_GPT_54_CONTEXT_TOKENS = 1_050_000;
@@ -52,10 +56,47 @@ function resolveOpenAIGpt54ForwardCompatModel(
   const trimmedModelId = modelId.trim();
   const lower = trimmedModelId.toLowerCase();
   let templateIds: readonly string[];
+  let patch: Partial<Model<Api>>;
   if (lower === OPENAI_GPT_54_MODEL_ID) {
     templateIds = OPENAI_GPT_54_TEMPLATE_MODEL_IDS;
+    patch = {
+      api: "openai-responses",
+      provider: normalizedProvider,
+      baseUrl: "https://api.openai.com/v1",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: OPENAI_GPT_54_CONTEXT_TOKENS,
+      maxTokens: OPENAI_GPT_54_MAX_TOKENS,
+    };
   } else if (lower === OPENAI_GPT_54_PRO_MODEL_ID) {
     templateIds = OPENAI_GPT_54_PRO_TEMPLATE_MODEL_IDS;
+    patch = {
+      api: "openai-responses",
+      provider: normalizedProvider,
+      baseUrl: "https://api.openai.com/v1",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: OPENAI_GPT_54_CONTEXT_TOKENS,
+      maxTokens: OPENAI_GPT_54_MAX_TOKENS,
+    };
+  } else if (lower === OPENAI_GPT_54_MINI_MODEL_ID) {
+    templateIds = OPENAI_GPT_54_MINI_TEMPLATE_MODEL_IDS;
+    patch = {
+      api: "openai-responses",
+      provider: normalizedProvider,
+      baseUrl: "https://api.openai.com/v1",
+      reasoning: true,
+      input: ["text", "image"],
+    };
+  } else if (lower === OPENAI_GPT_54_NANO_MODEL_ID) {
+    templateIds = OPENAI_GPT_54_NANO_TEMPLATE_MODEL_IDS;
+    patch = {
+      api: "openai-responses",
+      provider: normalizedProvider,
+      baseUrl: "https://api.openai.com/v1",
+      reasoning: true,
+      input: ["text", "image"],
+    };
   } else {
     return undefined;
   }
@@ -66,27 +107,15 @@ function resolveOpenAIGpt54ForwardCompatModel(
       trimmedModelId,
       templateIds: [...templateIds],
       modelRegistry,
-      patch: {
-        api: "openai-responses",
-        provider: normalizedProvider,
-        baseUrl: "https://api.openai.com/v1",
-        reasoning: true,
-        input: ["text", "image"],
-        contextWindow: OPENAI_GPT_54_CONTEXT_TOKENS,
-        maxTokens: OPENAI_GPT_54_MAX_TOKENS,
-      },
+      patch,
     }) ??
     normalizeModelCompat({
       id: trimmedModelId,
       name: trimmedModelId,
-      api: "openai-responses",
-      provider: normalizedProvider,
-      baseUrl: "https://api.openai.com/v1",
-      reasoning: true,
-      input: ["text", "image"],
+      ...patch,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: OPENAI_GPT_54_CONTEXT_TOKENS,
-      maxTokens: OPENAI_GPT_54_MAX_TOKENS,
+      contextWindow: patch.contextWindow ?? DEFAULT_CONTEXT_TOKENS,
+      maxTokens: patch.maxTokens ?? DEFAULT_CONTEXT_TOKENS,
     } as Model<Api>)
   );
 }

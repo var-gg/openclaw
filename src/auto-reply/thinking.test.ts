@@ -53,6 +53,8 @@ describe("listThinkingLevels", () => {
     expect(listThinkingLevels("openai", "gpt-5.2")).toContain("xhigh");
     expect(listThinkingLevels("openai", "gpt-5.4")).toContain("xhigh");
     expect(listThinkingLevels("openai", "gpt-5.4-pro")).toContain("xhigh");
+    expect(listThinkingLevels("openai", "gpt-5.4-mini")).toContain("xhigh");
+    expect(listThinkingLevels("openai", "gpt-5.4-nano")).toContain("xhigh");
   });
 
   it("includes xhigh for openai-codex gpt-5.4", () => {

@@ -313,6 +313,8 @@ describe("isModernModelRef", () => {
   it("includes OpenAI gpt-5.4 variants in modern selection", () => {
     expect(isModernModelRef({ provider: "openai", id: "gpt-5.4" })).toBe(true);
     expect(isModernModelRef({ provider: "openai", id: "gpt-5.4-pro" })).toBe(true);
+    expect(isModernModelRef({ provider: "openai", id: "gpt-5.4-mini" })).toBe(true);
+    expect(isModernModelRef({ provider: "openai", id: "gpt-5.4-nano" })).toBe(true);
     expect(isModernModelRef({ provider: "openai-codex", id: "gpt-5.4" })).toBe(true);
   });
 
@@ -370,6 +372,38 @@ describe("resolveForwardCompatModel", () => {
     expect(model?.api).toBe("openai-responses");
     expect(model?.baseUrl).toBe("https://api.openai.com/v1");
     expect(model?.contextWindow).toBe(1_050_000);
+    expect(model?.maxTokens).toBe(128_000);
+  });
+
+  it("resolves openai gpt-5.4-mini via template fallback", () => {
+    const registry = createRegistry({
+      "openai/gpt-5-mini": {
+        ...createOpenAITemplateModel("gpt-5-mini"),
+        contextWindow: 400_000,
+        maxTokens: 128_000,
+      },
+    });
+    const model = resolveForwardCompatModel("openai", "gpt-5.4-mini", registry);
+    expectResolvedForwardCompat(model, { provider: "openai", id: "gpt-5.4-mini" });
+    expect(model?.api).toBe("openai-responses");
+    expect(model?.baseUrl).toBe("https://api.openai.com/v1");
+    expect(model?.contextWindow).toBe(400_000);
+    expect(model?.maxTokens).toBe(128_000);
+  });
+
+  it("resolves openai gpt-5.4-nano via template fallback", () => {
+    const registry = createRegistry({
+      "openai/gpt-5-nano": {
+        ...createOpenAITemplateModel("gpt-5-nano"),
+        contextWindow: 400_000,
+        maxTokens: 128_000,
+      },
+    });
+    const model = resolveForwardCompatModel("openai", "gpt-5.4-nano", registry);
+    expectResolvedForwardCompat(model, { provider: "openai", id: "gpt-5.4-nano" });
+    expect(model?.api).toBe("openai-responses");
+    expect(model?.baseUrl).toBe("https://api.openai.com/v1");
+    expect(model?.contextWindow).toBe(400_000);
     expect(model?.maxTokens).toBe(128_000);
   });
 
