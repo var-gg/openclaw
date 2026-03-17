@@ -93,9 +93,15 @@ describe("agent channel activity monitor", () => {
     const renameChannel = vi.fn(
       async (_params: { channelId: string; name: string; accountId?: string }) => {},
     );
+    let currentName = "🟢-vargg-growth";
+    const fetchChannel = vi.fn(async () => ({ name: currentName }));
+    renameChannel.mockImplementation(async ({ name }) => {
+      currentName = name;
+    });
     const monitor = new AgentChannelActivityMonitor({
       workspaceDir,
       renameChannel,
+      fetchChannel,
       now: () => now,
       staleSweepIntervalMs: 60_000,
     });
@@ -145,9 +151,15 @@ describe("agent channel activity monitor", () => {
     const renameChannel = vi.fn(
       async (_params: { channelId: string; name: string; accountId?: string }) => {},
     );
+    let currentName = "🟢-ops-room";
+    const fetchChannel = vi.fn(async () => ({ name: currentName }));
+    renameChannel.mockImplementation(async ({ name }) => {
+      currentName = name;
+    });
     const monitor = new AgentChannelActivityMonitor({
       workspaceDir,
       renameChannel,
+      fetchChannel,
       now: () => now,
       staleSweepIntervalMs: 60_000,
     });
@@ -206,10 +218,16 @@ describe("agent channel activity monitor", () => {
     const renameChannel = vi.fn(
       async (_params: { channelId: string; name: string; accountId?: string }) => {},
     );
+    let currentName = "🟢-chief-of-staff";
+    const fetchChannel = vi.fn(async () => ({ name: currentName }));
+    renameChannel.mockImplementation(async ({ name }) => {
+      currentName = name;
+    });
     const monitor = new AgentChannelActivityMonitor({
       workspaceDir,
       cfg: makeCfg(workspaceDir),
       renameChannel,
+      fetchChannel,
       now: () => now,
       staleSweepIntervalMs: 60_000,
     });
@@ -310,9 +328,15 @@ describe("agent channel activity monitor", () => {
     const renameChannel = vi.fn(
       async (_params: { channelId: string; name: string; accountId?: string }) => {},
     );
+    let currentName = "🟢-main";
+    const fetchChannel = vi.fn(async () => ({ name: currentName }));
+    renameChannel.mockImplementation(async ({ name }) => {
+      currentName = name;
+    });
     const monitor = new AgentChannelActivityMonitor({
       workspaceDir,
       renameChannel,
+      fetchChannel,
       now: () => now,
       staleSweepIntervalMs: 60_000,
     });
@@ -360,5 +384,115 @@ describe("agent channel activity monitor", () => {
         baseName: "legacy-main",
       },
     });
+  });
+
+  it("falls back to a uniquely mapped channelId when the event sessionKey agent id changed", async () => {
+    const workspaceDir = await makeWorkspace();
+    await writeMap(workspaceDir, {
+      version: 2,
+      channels: {
+        "agent:main:discord:channel:123": {
+          channelId: "123",
+          baseName: "korean-tax-agent",
+        },
+      },
+    });
+
+    let currentName = "🟢-korean-tax-agent";
+    const renameChannel = vi.fn(async ({ name }: { channelId: string; name: string; accountId?: string }) => {
+      currentName = name;
+    });
+    const fetchChannel = vi.fn(async () => ({ name: currentName }));
+    const monitor = new AgentChannelActivityMonitor({
+      workspaceDir,
+      renameChannel,
+      fetchChannel,
+      now: () => Date.now(),
+      staleSweepIntervalMs: 60_000,
+    });
+    await monitor.start();
+
+    emitAgentEvent({
+      runId: "run-bound-agent",
+      stream: "lifecycle",
+      sessionKey: "agent:agent_chief_of_staff:discord:channel:123",
+      data: { phase: "start" },
+    });
+    emitAgentEvent({
+      runId: "run-bound-agent",
+      stream: "lifecycle",
+      sessionKey: "agent:agent_chief_of_staff:discord:channel:123",
+      data: { phase: "end" },
+    });
+    await monitor.stop();
+
+    expect(renameChannel).toHaveBeenCalledTimes(2);
+    expect(renameChannel.mock.calls.at(0)?.[0]).toEqual({ channelId: "123", name: "⚙️-korean-tax-agent" });
+    expect(renameChannel.mock.calls.at(1)?.[0]).toEqual({ channelId: "123", name: "🟢-korean-tax-agent" });
+  });
+
+  it("reconciles drift when persisted state says running but the actual channel is idle", async () => {
+    const workspaceDir = await makeWorkspace();
+    await writeMap(workspaceDir, {
+      version: 2,
+      channels: {
+        "agent:main:discord:channel:123": {
+          channelId: "123",
+          baseName: "main",
+        },
+      },
+    });
+
+    const statePath = path.join(workspaceDir, "ops", "state", "agent-activity.json");
+    await fs.mkdir(path.dirname(statePath), { recursive: true });
+    await fs.writeFile(
+      statePath,
+      `${JSON.stringify({
+        version: 2,
+        staleRunningMs: 21600000,
+        channels: {
+          "agent:main:discord:channel:123": {
+            state: "running",
+            updatedAt: 1000,
+            runs: {
+              "run-1": {
+                sessionKey: "agent:main:discord:channel:123",
+                status: "running",
+                startedAt: 1000,
+                updatedAt: 1000,
+              },
+            },
+            lastTargetName: "⚙️-main",
+            lastAppliedAt: 1000,
+          },
+        },
+      }, null, 2)}\n`,
+      "utf8",
+    );
+
+    let currentName = "🟢-main";
+    const renameChannel = vi.fn(async ({ name }: { channelId: string; name: string; accountId?: string }) => {
+      currentName = name;
+    });
+    const fetchChannel = vi.fn(async () => ({ name: currentName }));
+    const monitor = new AgentChannelActivityMonitor({
+      workspaceDir,
+      renameChannel,
+      fetchChannel,
+      now: () => 2000,
+      staleSweepIntervalMs: 60_000,
+    });
+    await monitor.start();
+
+    emitAgentEvent({
+      runId: "run-1",
+      stream: "lifecycle",
+      sessionKey: "agent:main:discord:channel:123",
+      data: { phase: "start" },
+    });
+    await monitor.stop();
+
+    expect(renameChannel).toHaveBeenCalledTimes(1);
+    expect(renameChannel.mock.calls.at(0)?.[0]).toEqual({ channelId: "123", name: "⚙️-main" });
   });
 });

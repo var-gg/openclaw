@@ -8,6 +8,7 @@ import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { resolveThreadParentSessionKey } from "../../sessions/session-key-utils.js";
 import { loadCombinedSessionStoreForGateway } from "../../gateway/session-utils.js";
 import { editChannelDiscord } from "../send.js";
+import { fetchChannelInfoDiscord } from "../send.guild.js";
 
 const log = createSubsystemLogger("discord-agent-activity");
 
@@ -56,10 +57,16 @@ type DiscordChannelRenameFn = (params: {
   accountId?: string;
 }) => Promise<void>;
 
+type DiscordChannelFetchFn = (params: {
+  channelId: string;
+  accountId?: string;
+}) => Promise<{ name?: string | null }>;
+
 type AgentChannelActivityMonitorOptions = {
   workspaceDir: string;
   cfg?: OpenClawConfig;
   renameChannel?: DiscordChannelRenameFn;
+  fetchChannel?: DiscordChannelFetchFn;
   now?: () => number;
   staleSweepIntervalMs?: number;
 };
@@ -292,6 +299,7 @@ export class AgentChannelActivityMonitor {
   private readonly configPath: string;
   private readonly statePath: string;
   private readonly renameChannel: DiscordChannelRenameFn;
+  private readonly fetchChannel: DiscordChannelFetchFn;
   private readonly now: () => number;
   private readonly staleSweepIntervalMs: number;
   private unsub: (() => void) | null = null;
@@ -312,6 +320,12 @@ export class AgentChannelActivityMonitor {
       options.renameChannel ??
       (async ({ channelId, name, accountId }) => {
         await editChannelDiscord({ channelId, name }, accountId ? { accountId } : undefined);
+      });
+    this.fetchChannel =
+      options.fetchChannel ??
+      (async ({ channelId, accountId }) => {
+        const channel = await fetchChannelInfoDiscord(channelId, accountId ? { accountId } : undefined);
+        return { name: "name" in channel ? ((channel as { name?: string | null }).name ?? undefined) : undefined };
       });
     this.now = options.now ?? (() => Date.now());
     this.staleSweepIntervalMs = options.staleSweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
@@ -376,6 +390,15 @@ export class AgentChannelActivityMonitor {
     if (eventRoot && params.mappedRoots.has(eventRoot)) {
       return eventRoot;
     }
+    const eventChannelId = extractDiscordChannelIdFromRootSessionKey(eventRoot ?? params.sessionKey);
+    if (eventChannelId) {
+      const matchingRoots = [...params.mappedRoots].filter(
+        (root) => extractDiscordChannelIdFromRootSessionKey(root) === eventChannelId,
+      );
+      if (matchingRoots.length === 1) {
+        return matchingRoots[0] ?? null;
+      }
+    }
 
     const normalizedSessionKey = normalizeSessionKey(params.sessionKey);
     if (!normalizedSessionKey) {
@@ -389,6 +412,15 @@ export class AgentChannelActivityMonitor {
       const channelRoot = extractDiscordChannelRootSessionKey(current);
       if (channelRoot && params.mappedRoots.has(channelRoot)) {
         return channelRoot;
+      }
+      const traversedChannelId = extractDiscordChannelIdFromRootSessionKey(channelRoot ?? current);
+      if (traversedChannelId) {
+        const matchingRoots = [...params.mappedRoots].filter(
+          (root) => extractDiscordChannelIdFromRootSessionKey(root) === traversedChannelId,
+        );
+        if (matchingRoots.length === 1) {
+          return matchingRoots[0] ?? null;
+        }
       }
       const entry = params.store[current];
       const spawnedBy = normalizeSessionKey(entry?.spawnedBy);
@@ -488,28 +520,59 @@ export class AgentChannelActivityMonitor {
   ) {
     const targetName = synthesizeChannelName(mapping.baseName, next.state);
     const previous = this.state.channels[rootSessionKey];
-    const nameChanged = previous?.lastTargetName !== targetName;
+    const now = this.now();
+    let observedName = previous?.lastTargetName;
+
+    try {
+      const channel = await this.fetchChannel({
+        channelId: mapping.channelId,
+        ...(mapping.accountId ? { accountId: mapping.accountId } : {}),
+      });
+      observedName = typeof channel.name === "string" && channel.name.trim() ? channel.name.trim() : observedName;
+    } catch (err) {
+      log.warn(`failed to fetch Discord channel before rename for root ${rootSessionKey}: ${String(err)}`);
+    }
+
+    const shouldRename = observedName !== targetName;
+    let renameAppliedAt = previous?.lastAppliedAt;
+    let finalName = observedName ?? previous?.lastTargetName ?? targetName;
+
+    if (shouldRename) {
+      log.info(`discord-agent-activity rename requested: root=${rootSessionKey} channelId=${mapping.channelId} from=${JSON.stringify(observedName ?? null)} to=${JSON.stringify(targetName)}`);
+      try {
+        await this.renameChannel({
+          channelId: mapping.channelId,
+          name: targetName,
+          ...(mapping.accountId ? { accountId: mapping.accountId } : {}),
+        });
+        renameAppliedAt = now;
+      } catch (err) {
+        log.warn(`failed to rename Discord channel for root ${rootSessionKey}: ${String(err)}`);
+      }
+
+      try {
+        const channel = await this.fetchChannel({
+          channelId: mapping.channelId,
+          ...(mapping.accountId ? { accountId: mapping.accountId } : {}),
+        });
+        finalName = typeof channel.name === "string" && channel.name.trim() ? channel.name.trim() : finalName;
+      } catch (err) {
+        log.warn(`failed to fetch Discord channel after rename for root ${rootSessionKey}: ${String(err)}`);
+      }
+
+      if (finalName !== targetName) {
+        log.warn(
+          `discord-agent-activity rename drift: root=${rootSessionKey} channelId=${mapping.channelId} expected=${JSON.stringify(targetName)} actual=${JSON.stringify(finalName ?? null)}`,
+        );
+      }
+    }
 
     this.state.channels[rootSessionKey] = {
       ...next,
-      lastTargetName: targetName,
-      ...(nameChanged ? { lastAppliedAt: this.now() } : { lastAppliedAt: previous?.lastAppliedAt }),
+      lastTargetName: finalName,
+      ...(renameAppliedAt ? { lastAppliedAt: renameAppliedAt } : previous?.lastAppliedAt ? { lastAppliedAt: previous.lastAppliedAt } : {}),
     };
     await this.persistState();
-
-    if (!nameChanged) {
-      return;
-    }
-
-    try {
-      await this.renameChannel({
-        channelId: mapping.channelId,
-        name: targetName,
-        ...(mapping.accountId ? { accountId: mapping.accountId } : {}),
-      });
-    } catch (err) {
-      log.warn(`failed to rename Discord channel for root ${rootSessionKey}: ${String(err)}`);
-    }
   }
 
   private async recoverStaleRunningChannels() {
