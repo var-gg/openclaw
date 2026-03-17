@@ -17,6 +17,12 @@ export type AgentRunContext = {
   isHeartbeat?: boolean;
   /** Whether control UI clients should receive chat/agent updates for this run. */
   isControlUiVisible?: boolean;
+  /**
+   * Whether internal event-bus listeners should receive the run sessionKey.
+   * Keep this separate from Control UI visibility so internal monitors can
+   * correlate runs without exposing session identifiers to external clients.
+   */
+  isSessionKeyVisibleToInternalListeners?: boolean;
 };
 
 // Keep per-run counters so streams stay strictly monotonic per runId.
@@ -42,6 +48,12 @@ export function registerAgentRunContext(runId: string, context: AgentRunContext)
   if (context.isControlUiVisible !== undefined) {
     existing.isControlUiVisible = context.isControlUiVisible;
   }
+  if (
+    context.isSessionKeyVisibleToInternalListeners !== undefined &&
+    existing.isSessionKeyVisibleToInternalListeners !== context.isSessionKeyVisibleToInternalListeners
+  ) {
+    existing.isSessionKeyVisibleToInternalListeners = context.isSessionKeyVisibleToInternalListeners;
+  }
   if (context.isHeartbeat !== undefined && existing.isHeartbeat !== context.isHeartbeat) {
     existing.isHeartbeat = context.isHeartbeat;
   }
@@ -63,10 +75,13 @@ export function emitAgentEvent(event: Omit<AgentEventPayload, "seq" | "ts">) {
   const nextSeq = (seqByRun.get(event.runId) ?? 0) + 1;
   seqByRun.set(event.runId, nextSeq);
   const context = runContextById.get(event.runId);
-  const isControlUiVisible = context?.isControlUiVisible ?? true;
+  const isSessionKeyVisibleToInternalListeners =
+    context?.isSessionKeyVisibleToInternalListeners ?? true;
   const eventSessionKey =
     typeof event.sessionKey === "string" && event.sessionKey.trim() ? event.sessionKey : undefined;
-  const sessionKey = isControlUiVisible ? (eventSessionKey ?? context?.sessionKey) : undefined;
+  const sessionKey = isSessionKeyVisibleToInternalListeners
+    ? (eventSessionKey ?? context?.sessionKey)
+    : undefined;
   const enriched: AgentEventPayload = {
     ...event,
     sessionKey,

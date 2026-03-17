@@ -1,8 +1,12 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { emitAgentEvent } from "../../infra/agent-events.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  emitAgentEvent,
+  registerAgentRunContext,
+  resetAgentRunContextForTest,
+} from "../../infra/agent-events.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import {
   AgentChannelActivityMonitor,
@@ -49,8 +53,13 @@ function makeCfg(workspaceDir: string): OpenClawConfig {
 }
 
 describe("agent channel activity monitor", () => {
+  beforeEach(() => {
+    resetAgentRunContextForTest();
+  });
+
   afterEach(() => {
     vi.useRealTimers();
+    resetAgentRunContextForTest();
   });
 
   it("synthesizes canonical emoji-prefixed channel names", () => {
@@ -118,6 +127,56 @@ describe("agent channel activity monitor", () => {
 
     const state = await readState(workspaceDir);
     expect(state.channels["agent:main:discord:channel:123"]?.state).toBe("idle");
+  });
+
+  it("tracks direct Discord root runs from run context when lifecycle events are hidden from Control UI", async () => {
+    const workspaceDir = await makeWorkspace();
+    await writeMap(workspaceDir, {
+      version: 2,
+      channels: {
+        "agent:main:discord:channel:123": {
+          channelId: "123",
+          baseName: "ops-room",
+        },
+      },
+    });
+
+    let now = 2_000;
+    const renameChannel = vi.fn(
+      async (_params: { channelId: string; name: string; accountId?: string }) => {},
+    );
+    const monitor = new AgentChannelActivityMonitor({
+      workspaceDir,
+      renameChannel,
+      now: () => now,
+      staleSweepIntervalMs: 60_000,
+    });
+    await monitor.start();
+
+    registerAgentRunContext("run-discord-direct", {
+      sessionKey: "agent:main:discord:channel:123",
+      isControlUiVisible: false,
+    });
+
+    emitAgentEvent({
+      runId: "run-discord-direct",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    now += 10;
+    emitAgentEvent({
+      runId: "run-discord-direct",
+      stream: "lifecycle",
+      data: { phase: "error", error: "boom" },
+    });
+    await monitor.stop();
+
+    expect(renameChannel).toHaveBeenCalledTimes(2);
+    expect(renameChannel.mock.calls.at(0)?.[0]).toEqual({ channelId: "123", name: "⚙️-ops-room" });
+    expect(renameChannel.mock.calls.at(1)?.[0]).toEqual({ channelId: "123", name: "🔴-ops-room" });
+
+    const state = await readState(workspaceDir);
+    expect(state.channels["agent:main:discord:channel:123"]?.state).toBe("error");
   });
 
   it("keeps parent channel running until spawned child work completes and surfaces child errors", async () => {

@@ -62,7 +62,7 @@ describe("agent-events sequencing", () => {
     expect(phases).toEqual(["start", "end"]);
   });
 
-  test("omits sessionKey for runs hidden from Control UI", async () => {
+  test("preserves sessionKey on the internal event bus even when Control UI is hidden", async () => {
     resetAgentRunContextForTest();
     registerAgentRunContext("run-hidden", {
       sessionKey: "session-imessage",
@@ -77,7 +77,27 @@ describe("agent-events sequencing", () => {
       runId: "run-hidden",
       stream: "assistant",
       data: { text: "hi" },
-      sessionKey: "session-imessage",
+    });
+    stop();
+
+    expect(receivedSessionKey).toBe("session-imessage");
+  });
+
+  test("can explicitly hide sessionKey from internal listeners", async () => {
+    resetAgentRunContextForTest();
+    registerAgentRunContext("run-internal-hidden", {
+      sessionKey: "session-secret",
+      isSessionKeyVisibleToInternalListeners: false,
+    });
+
+    let receivedSessionKey: string | undefined;
+    const stop = onAgentEvent((evt) => {
+      receivedSessionKey = evt.sessionKey;
+    });
+    emitAgentEvent({
+      runId: "run-internal-hidden",
+      stream: "assistant",
+      data: { text: "hi" },
     });
     stop();
 
