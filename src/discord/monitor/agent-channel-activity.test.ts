@@ -312,6 +312,62 @@ describe("agent channel activity monitor", () => {
     expect(renameChannel).toHaveBeenCalledTimes(0);
   });
 
+  it("falls back to the only running tracked run for orphan completions", async () => {
+    const workspaceDir = await makeWorkspace();
+    await writeMap(workspaceDir, {
+      version: 2,
+      channels: {
+        "agent:main:discord:channel:123": {
+          channelId: "123",
+          baseName: "main",
+        },
+      },
+    });
+    await writeSessionStore(workspaceDir, {
+      "agent:main:subagent:child": {
+        sessionId: "child",
+        updatedAt: 2,
+        spawnedBy: "agent:main:discord:channel:123",
+      },
+    });
+
+    let currentName = "🟢-main";
+    const renameChannel = vi.fn(async ({ name }: { channelId: string; name: string; accountId?: string }) => {
+      currentName = name;
+    });
+    const fetchChannel = vi.fn(async () => ({ name: currentName }));
+    const monitor = new AgentChannelActivityMonitor({
+      workspaceDir,
+      cfg: makeCfg(workspaceDir),
+      renameChannel,
+      fetchChannel,
+      now: () => Date.now(),
+      staleSweepIntervalMs: 60_000,
+    });
+    await monitor.start();
+
+    emitAgentEvent({
+      runId: "root-run",
+      stream: "lifecycle",
+      sessionKey: "agent:main:discord:channel:123",
+      data: { phase: "start" },
+    });
+    emitAgentEvent({
+      runId: "orphan-end-run",
+      stream: "lifecycle",
+      sessionKey: "agent:main:subagent:child",
+      data: { phase: "end" },
+    });
+    await monitor.stop();
+
+    expect(renameChannel).toHaveBeenCalledTimes(2);
+    expect(renameChannel.mock.calls.at(0)?.[0]).toEqual({ channelId: "123", name: "⚙️-main" });
+    expect(renameChannel.mock.calls.at(1)?.[0]).toEqual({ channelId: "123", name: "🟢-main" });
+
+    const state = await readState(workspaceDir);
+    expect(state.channels["agent:main:discord:channel:123"]?.state).toBe("idle");
+  });
+
   it("recovers stale running channels back to idle conservatively", async () => {
     const workspaceDir = await makeWorkspace();
     await writeMap(workspaceDir, {

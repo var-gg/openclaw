@@ -293,6 +293,34 @@ function collectLatestError(runs: Record<string, PersistedRunRecord> | undefined
   return ordered.find((run) => run.status === "error")?.lastError;
 }
 
+function findFallbackRunningRunId(
+  runs: Record<string, PersistedRunRecord>,
+  sessionKey: string | undefined,
+): string | null {
+  const runningEntries = Object.entries(runs).filter(([, run]) => run.status === "running");
+  if (runningEntries.length === 0) {
+    return null;
+  }
+  const normalizedSessionKey = normalizeSessionKey(sessionKey);
+  if (normalizedSessionKey) {
+    const exactMatch = runningEntries.find(
+      ([, run]) => normalizeSessionKey(run.sessionKey) === normalizedSessionKey,
+    );
+    if (exactMatch) {
+      return exactMatch[0];
+    }
+  }
+  if (runningEntries.length === 1) {
+    return runningEntries[0]?.[0] ?? null;
+  }
+  const latestRunning = [...runningEntries].sort((a, b) => {
+    const aTime = a[1].updatedAt ?? a[1].startedAt;
+    const bTime = b[1].updatedAt ?? b[1].startedAt;
+    return bTime - aTime;
+  })[0];
+  return latestRunning?.[0] ?? null;
+}
+
 export class AgentChannelActivityMonitor {
   private readonly workspaceDir: string;
   private readonly cfg?: OpenClawConfig;
@@ -473,6 +501,7 @@ export class AgentChannelActivityMonitor {
     }
 
     const previousRun = runs[evt.runId];
+    let fallbackRunId: string | null = null;
     if (phase === "start") {
       runs[evt.runId] = {
         sessionKey: normalizeSessionKey(evt.sessionKey) ?? previousRun?.sessionKey,
@@ -490,9 +519,34 @@ export class AgentChannelActivityMonitor {
           : {}),
       };
     } else {
-      // Ignore orphan completions that do not belong to an active tracked tree.
-      return;
+      fallbackRunId = findFallbackRunningRunId(runs, evt.sessionKey);
+      if (!fallbackRunId) {
+        log.info(
+          `discord-agent-activity orphan completion ignored: phase=${phase} runId=${evt.runId} sessionKey=${JSON.stringify(evt.sessionKey ?? null)} root=${rootSessionKey}`,
+        );
+        return;
+      }
+      const fallbackRun = runs[fallbackRunId];
+      if (!fallbackRun) {
+        return;
+      }
+      log.info(
+        `discord-agent-activity orphan completion fallback: phase=${phase} runId=${evt.runId} fallbackRunId=${fallbackRunId} sessionKey=${JSON.stringify(evt.sessionKey ?? null)} root=${rootSessionKey}`,
+      );
+      runs[fallbackRunId] = {
+        ...fallbackRun,
+        sessionKey: normalizeSessionKey(evt.sessionKey) ?? fallbackRun.sessionKey,
+        status: phase === "error" ? "error" : "ok",
+        updatedAt: now,
+        ...(phase === "error" && typeof evt.data?.error === "string" && evt.data.error.trim()
+          ? { lastError: evt.data.error.trim() }
+          : {}),
+      };
     }
+
+    log.info(
+      `discord-agent-activity lifecycle handled: phase=${phase} runId=${evt.runId} sessionKey=${JSON.stringify(evt.sessionKey ?? null)} root=${rootSessionKey} previousRun=${previousRun ? "yes" : "no"} fallbackRunId=${fallbackRunId ?? ""}`,
+    );
 
     const next: PersistedChannelRecord = {
       ...current,
