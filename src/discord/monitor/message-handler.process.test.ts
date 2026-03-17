@@ -59,10 +59,16 @@ const runtimeMocks = vi.hoisted(() => ({
   readSessionUpdatedAt: vi.fn(() => undefined),
   resolveStorePath: vi.fn(() => "/tmp/openclaw-discord-process-test-sessions.json"),
 }));
+const agentEventMocks = vi.hoisted(() => ({
+  emitAgentEvent: vi.fn(() => {}),
+  getAgentRunContext: vi.fn(() => undefined),
+}));
 const dispatchInboundMessage = runtimeMocks.dispatchInboundMessage;
 const recordInboundSession = runtimeMocks.recordInboundSession;
 const readSessionUpdatedAt = runtimeMocks.readSessionUpdatedAt;
 const resolveStorePath = runtimeMocks.resolveStorePath;
+const emitAgentEvent = agentEventMocks.emitAgentEvent;
+const getAgentRunContext = agentEventMocks.getAgentRunContext;
 
 vi.mock("../send.js", () => ({
   reactMessageDiscord: sendMocks.reactMessageDiscord,
@@ -129,6 +135,11 @@ vi.mock("../../config/sessions.js", () => ({
   resolveStorePath: runtimeMocks.resolveStorePath,
 }));
 
+vi.mock("../../infra/agent-events.js", () => ({
+  emitAgentEvent: agentEventMocks.emitAgentEvent,
+  getAgentRunContext: agentEventMocks.getAgentRunContext,
+}));
+
 const { processDiscordMessage } = await import("./message-handler.process.js");
 
 const createBaseContext = createBaseDiscordMessageContext;
@@ -144,6 +155,8 @@ beforeEach(() => {
   recordInboundSession.mockClear();
   readSessionUpdatedAt.mockClear();
   resolveStorePath.mockClear();
+  emitAgentEvent.mockClear();
+  getAgentRunContext.mockClear();
   dispatchInboundMessage.mockResolvedValue({
     queuedFinal: false,
     counts: { final: 0, tool: 0, block: 0 },
@@ -151,6 +164,7 @@ beforeEach(() => {
   recordInboundSession.mockResolvedValue(undefined);
   readSessionUpdatedAt.mockReturnValue(undefined);
   resolveStorePath.mockReturnValue("/tmp/openclaw-discord-process-test-sessions.json");
+  getAgentRunContext.mockReturnValue(undefined);
   threadBindingTesting.resetThreadBindingsForTests();
 });
 
@@ -631,5 +645,30 @@ describe("processDiscordMessage abort/send hardening", () => {
     expect(logs).toContain('"event":"run_end"');
     expect(logs).toContain('"runId":"run-log-1"');
     expect(logs).toContain('"sessionKey":"agent:main:discord:');
+  });
+
+  it("emits a lifecycle terminal backstop when the agent run context is still present", async () => {
+    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+      params?.replyOptions?.onAgentRunStart?.("run-backstop-1");
+      params?.dispatcher.sendFinalReply({ text: "ok" });
+      await params?.dispatcher.waitForIdle?.();
+      return { queuedFinal: true, counts: { final: 1, tool: 0, block: 0 } };
+    });
+    getAgentRunContext.mockReturnValue({
+      sessionKey: "agent:main:discord:channel:123",
+      isSessionKeyVisibleToInternalListeners: true,
+    });
+
+    const ctx = await createBaseContext();
+
+    // oxlint-disable-next-line typescript/no-explicit-any
+    await processDiscordMessage(ctx as any);
+
+    expect(emitAgentEvent).toHaveBeenCalledWith({
+      runId: "run-backstop-1",
+      stream: "lifecycle",
+      sessionKey: expect.stringContaining("agent:main:discord:"),
+      data: { phase: "end" },
+    });
   });
 });

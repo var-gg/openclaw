@@ -25,6 +25,7 @@ import { isDangerousNameMatchingEnabled } from "../../config/dangerous-name-matc
 import { resolveDiscordPreviewStreamMode } from "../../config/discord-preview-streaming.js";
 import { resolveMarkdownTableMode } from "../../config/markdown-tables.js";
 import { readSessionUpdatedAt, resolveStorePath } from "../../config/sessions.js";
+import { emitAgentEvent, getAgentRunContext } from "../../infra/agent-events.js";
 import { danger, logVerbose, shouldLogVerbose } from "../../globals.js";
 import { convertMarkdownTables } from "../../markdown/tables.js";
 import { buildAgentSessionKey } from "../../routing/resolve-route.js";
@@ -803,12 +804,32 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
   let dispatchError = false;
   let dispatchThrown: unknown;
   let didEmitRunStart = false;
+  let didEmitTerminalLifecycleBackstop = false;
   const emitRunStart = (runId?: string) => {
     if (didEmitRunStart) {
       return;
     }
     didEmitRunStart = true;
     emitLifecycle("run_start", { runId });
+  };
+  const emitTerminalLifecycleBackstop = (phase: "end" | "error") => {
+    if (didEmitTerminalLifecycleBackstop || !lifecycleRunId) {
+      return;
+    }
+    const runContext = getAgentRunContext(lifecycleRunId);
+    if (!runContext) {
+      return;
+    }
+    didEmitTerminalLifecycleBackstop = true;
+    emitAgentEvent({
+      runId: lifecycleRunId,
+      stream: "lifecycle",
+      sessionKey: persistedSessionKey,
+      data: {
+        phase,
+        ...(phase === "error" || dispatchThrown ? { error: String(dispatchThrown ?? "discord dispatch error") } : {}),
+      },
+    });
   };
   try {
     dispatchResult = await dispatchInboundMessage({
@@ -908,6 +929,7 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     finalSendFailed,
     ...(dispatchThrown ? { error: String(dispatchThrown) } : {}),
   });
+  emitTerminalLifecycleBackstop(dispatchThrown ? "error" : "end");
   if (dispatchThrown) {
     throw dispatchThrown;
   }
