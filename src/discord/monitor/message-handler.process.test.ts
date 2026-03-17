@@ -642,6 +642,25 @@ describe("processDiscordMessage abort/send hardening", () => {
     expect(logs).toContain('"sessionKey":"agent:main:discord:');
   });
 
+  it("emits a lifecycle start backstop when discord run starts", async () => {
+    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+      params?.replyOptions?.onAgentRunStart?.("run-backstop-start-1");
+      return { queuedFinal: false, counts: { final: 0, tool: 0, block: 0 } };
+    });
+
+    const ctx = await createBaseContext();
+
+    // oxlint-disable-next-line typescript/no-explicit-any
+    await processDiscordMessage(ctx as any);
+
+    expect(emitAgentEvent).toHaveBeenCalledWith({
+      runId: "run-backstop-start-1",
+      stream: "lifecycle",
+      sessionKey: expect.stringContaining("agent:main:discord:"),
+      data: { phase: "start" },
+    });
+  });
+
   it("always emits a lifecycle terminal backstop after discord run completion", async () => {
     dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
       params?.replyOptions?.onAgentRunStart?.("run-backstop-1");

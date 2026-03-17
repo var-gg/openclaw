@@ -363,7 +363,9 @@ export class AgentChannelActivityMonitor {
     this.state = normalizeState(await readJsonFile(this.statePath));
     await this.persistState();
     this.unsub = onAgentEvent((evt) => {
-      void this.enqueue(() => this.handleEvent(evt));
+      void this.enqueue(() => this.handleEvent(evt)).catch((err) => {
+        log.warn(`discord-agent-activity event handling failed: ${String(err)}`);
+      });
     });
     this.sweepTimer = setInterval(() => {
       void this.enqueue(() => this.recoverStaleRunningChannels());

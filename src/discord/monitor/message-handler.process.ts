@@ -811,6 +811,16 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     }
     didEmitRunStart = true;
     emitLifecycle("run_start", { runId });
+    if (runId) {
+      emitAgentEvent({
+        runId,
+        stream: "lifecycle",
+        sessionKey: persistedSessionKey,
+        data: {
+          phase: "start",
+        },
+      });
+    }
   };
   const emitTerminalLifecycleBackstop = (phase: "end" | "error") => {
     if (didEmitTerminalLifecycleBackstop || !lifecycleRunId) {
