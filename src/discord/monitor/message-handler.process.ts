@@ -25,7 +25,7 @@ import { isDangerousNameMatchingEnabled } from "../../config/dangerous-name-matc
 import { resolveDiscordPreviewStreamMode } from "../../config/discord-preview-streaming.js";
 import { resolveMarkdownTableMode } from "../../config/markdown-tables.js";
 import { readSessionUpdatedAt, resolveStorePath } from "../../config/sessions.js";
-import { emitAgentEvent, getAgentRunContext } from "../../infra/agent-events.js";
+import { emitAgentEvent } from "../../infra/agent-events.js";
 import { danger, logVerbose, shouldLogVerbose } from "../../globals.js";
 import { convertMarkdownTables } from "../../markdown/tables.js";
 import { buildAgentSessionKey } from "../../routing/resolve-route.js";
@@ -814,10 +814,6 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
   };
   const emitTerminalLifecycleBackstop = (phase: "end" | "error") => {
     if (didEmitTerminalLifecycleBackstop || !lifecycleRunId) {
-      return;
-    }
-    const runContext = getAgentRunContext(lifecycleRunId);
-    if (!runContext) {
       return;
     }
     didEmitTerminalLifecycleBackstop = true;
