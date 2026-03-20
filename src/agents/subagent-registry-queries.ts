@@ -1,6 +1,14 @@
 import type { DeliveryContext } from "../utils/delivery-context.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
+export type PendingDescendantRunsSummary = {
+  total: number;
+  active: number;
+  cleanupPending: number;
+  completionMessagePending: number;
+  wakePending: number;
+};
+
 export function findRunIdsByChildSessionKeyFromRuns(
   runs: Map<string, SubagentRunRecord>,
   childSessionKey: string,
@@ -95,10 +103,10 @@ export function shouldIgnorePostCompletionAnnounceForSessionFromRuns(
   const latest = findLatestRunForChildSession(runs, childSessionKey);
   return Boolean(
     latest &&
-    latest.spawnMode !== "session" &&
-    typeof latest.endedAt === "number" &&
-    typeof latest.cleanupCompletedAt === "number" &&
-    latest.cleanupCompletedAt >= latest.endedAt,
+      latest.spawnMode !== "session" &&
+      typeof latest.endedAt === "number" &&
+      typeof latest.cleanupCompletedAt === "number" &&
+      latest.cleanupCompletedAt >= latest.endedAt,
   );
 }
 
@@ -186,25 +194,51 @@ export function countActiveDescendantRunsFromRuns(
   return count;
 }
 
+function summarizePendingDescendantRunsInternal(
+  runs: Map<string, SubagentRunRecord>,
+  rootSessionKey: string,
+  excludeRunId?: string,
+): PendingDescendantRunsSummary {
+  const excludedRunId = excludeRunId?.trim();
+  const summary: PendingDescendantRunsSummary = {
+    total: 0,
+    active: 0,
+    cleanupPending: 0,
+    completionMessagePending: 0,
+    wakePending: 0,
+  };
+  if (
+    !forEachDescendantRun(runs, rootSessionKey, (runId, entry) => {
+      const runEnded = typeof entry.endedAt === "number";
+      const cleanupCompleted = typeof entry.cleanupCompletedAt === "number";
+      if ((runEnded && cleanupCompleted) || runId === excludedRunId) {
+        return;
+      }
+      summary.total += 1;
+      if (!runEnded) {
+        summary.active += 1;
+        return;
+      }
+      summary.cleanupPending += 1;
+      if (entry.expectsCompletionMessage === true) {
+        summary.completionMessagePending += 1;
+      }
+      if (entry.wakeOnDescendantSettle === true) {
+        summary.wakePending += 1;
+      }
+    })
+  ) {
+    return summary;
+  }
+  return summary;
+}
+
 function countPendingDescendantRunsInternal(
   runs: Map<string, SubagentRunRecord>,
   rootSessionKey: string,
   excludeRunId?: string,
 ): number {
-  const excludedRunId = excludeRunId?.trim();
-  let count = 0;
-  if (
-    !forEachDescendantRun(runs, rootSessionKey, (runId, entry) => {
-      const runEnded = typeof entry.endedAt === "number";
-      const cleanupCompleted = typeof entry.cleanupCompletedAt === "number";
-      if ((!runEnded || !cleanupCompleted) && runId !== excludedRunId) {
-        count += 1;
-      }
-    })
-  ) {
-    return 0;
-  }
-  return count;
+  return summarizePendingDescendantRunsInternal(runs, rootSessionKey, excludeRunId).total;
 }
 
 export function countPendingDescendantRunsFromRuns(
@@ -212,6 +246,13 @@ export function countPendingDescendantRunsFromRuns(
   rootSessionKey: string,
 ): number {
   return countPendingDescendantRunsInternal(runs, rootSessionKey);
+}
+
+export function summarizePendingDescendantRunsFromRuns(
+  runs: Map<string, SubagentRunRecord>,
+  rootSessionKey: string,
+): PendingDescendantRunsSummary {
+  return summarizePendingDescendantRunsInternal(runs, rootSessionKey);
 }
 
 export function countPendingDescendantRunsExcludingRunFromRuns(

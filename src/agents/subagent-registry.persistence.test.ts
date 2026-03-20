@@ -3,7 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import "./subagent-registry.mocks.shared.js";
+import { callGateway } from "../gateway/call.js";
 import { captureEnv } from "../test-utils/env.js";
+import { resetActivityObserverForTests } from "./activity-observer.js";
 import {
   addSubagentRunForTests,
   clearSubagentRunSteerRestart,
@@ -23,6 +25,7 @@ vi.mock("./subagent-announce.js", () => ({
 
 describe("subagent registry persistence", () => {
   const envSnapshot = captureEnv(["OPENCLAW_STATE_DIR"]);
+  const mockedCallGateway = vi.mocked(callGateway);
   let tempStateDir: string | null = null;
 
   const resolveAgentIdFromSessionKey = (sessionKey: string) => {
@@ -162,7 +165,15 @@ describe("subagent registry persistence", () => {
   };
 
   afterEach(async () => {
+    vi.useRealTimers();
     announceSpy.mockClear();
+    mockedCallGateway.mockReset();
+    mockedCallGateway.mockImplementation(async () => ({
+      status: "ok",
+      startedAt: 111,
+      endedAt: 222,
+    }));
+    resetActivityObserverForTests();
     resetSubagentRegistryForTests({ persist: false });
     if (tempStateDir) {
       await fs.rm(tempStateDir, { recursive: true, force: true });
@@ -425,6 +436,55 @@ describe("subagent registry persistence", () => {
     expect(listSubagentRunsForRequester("agent:main:main")).toHaveLength(0);
     const persisted = loadSubagentRegistryFromDisk();
     expect(persisted.has(runId)).toBe(false);
+  });
+
+  it("watchdog terminalizes run-mode subagents that never deliver completion", async () => {
+    vi.useFakeTimers();
+    mockedCallGateway.mockImplementation(async (params) => {
+      if (params.method === "agent.wait") {
+        throw new Error("wait unavailable");
+      }
+      return {
+        status: "ok",
+        startedAt: 111,
+        endedAt: 222,
+      };
+    });
+
+    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
+    process.env.OPENCLAW_STATE_DIR = tempStateDir;
+    const now = new Date("2026-03-17T22:00:00.000Z");
+    vi.setSystemTime(now);
+
+    registerSubagentRun({
+      runId: "run-watchdog",
+      childSessionKey: "agent:main:subagent:watchdog",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "watchdog me",
+      cleanup: "keep",
+      expectsCompletionMessage: true,
+      spawnMode: "run",
+    });
+    await writeChildSessionEntry({
+      sessionKey: "agent:main:subagent:watchdog",
+      sessionId: "sess-watchdog",
+      updatedAt: now.getTime(),
+    });
+    await flushQueuedRegistryWork();
+
+    await vi.advanceTimersByTimeAsync(35_000);
+    await flushQueuedRegistryWork();
+
+    const persisted = loadSubagentRegistryFromDisk();
+    const entry = persisted.get("run-watchdog");
+    expect(entry?.endedReason).toBe("subagent-error");
+    expect(entry?.outcome).toEqual({
+      status: "error",
+      error: "subagent completion watchdog timeout",
+    });
+    expect(typeof entry?.cleanupCompletedAt).toBe("number");
+    expect(announceSpy).toHaveBeenCalled();
   });
 
   it("uses isolated temp state when OPENCLAW_STATE_DIR is unset in tests", async () => {

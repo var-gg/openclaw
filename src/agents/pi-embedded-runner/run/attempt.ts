@@ -1558,7 +1558,9 @@ export async function runEmbeddedAttempt(
           abortRun(false, reason);
         },
       };
-      setActiveEmbeddedRun(params.sessionId, queueHandle, params.sessionKey);
+      setActiveEmbeddedRun(params.sessionId, queueHandle, params.sessionKey, {
+        runId: params.runId,
+      });
 
       let abortWarnTimer: NodeJS.Timeout | undefined;
       const isProbeSession = params.sessionId?.startsWith("probe-") ?? false;
@@ -2081,3 +2083,4 @@ export async function runEmbeddedAttempt(
     process.chdir(prevCwd);
   }
 }
+

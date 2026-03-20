@@ -42,6 +42,7 @@ import {
   runSubagentAnnounceDispatch,
   type SubagentAnnounceDeliveryResult,
 } from "./subagent-announce-dispatch.js";
+import { emitActivityObserverEvent } from "./activity-observer.js";
 import { type AnnounceQueueItem, enqueueAnnounce } from "./subagent-announce-queue.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import type { SpawnSubagentMode } from "./subagent-spawn.js";
@@ -1164,6 +1165,13 @@ export async function runSubagentAnnounceFlow(params: {
   const expectsCompletionMessage = params.expectsCompletionMessage === true;
   const announceType = params.announceType ?? "subagent task";
   let shouldDeleteChildSession = params.cleanup === "delete";
+  emitActivityObserverEvent({
+    source: "subagent-announce",
+    action: "announce_started",
+    runId: params.childRunId,
+    sessionKeys: [params.requesterSessionKey, params.childSessionKey],
+    sourceKind: "announce",
+  });
   try {
     let targetRequesterSessionKey = params.requesterSessionKey;
     let targetRequesterOrigin = normalizeDeliveryContext(params.requesterOrigin);
@@ -1453,6 +1461,13 @@ export async function runSubagentAnnounceFlow(params: {
     defaultRuntime.error?.(`Subagent announce failed: ${String(err)}`);
     // Best-effort follow-ups; ignore failures to avoid breaking the caller response.
   } finally {
+    emitActivityObserverEvent({
+      source: "subagent-announce",
+      action: "announce_finished",
+      runId: params.childRunId,
+      sessionKeys: [params.requesterSessionKey, params.childSessionKey],
+      sourceKind: "announce",
+    });
     // Patch label after all writes complete
     if (params.label) {
       try {
