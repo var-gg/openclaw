@@ -32,6 +32,7 @@ import { buildAgentSessionKey } from "../../routing/resolve-route.js";
 import { resolveThreadSessionKeys } from "../../routing/session-key.js";
 import { stripReasoningTagsFromText } from "../../shared/text/reasoning-tags.js";
 import { truncateUtf16Safe } from "../../utils.js";
+import { resolveDiscordMaxLinesPerMessage } from "../accounts.js";
 import { chunkDiscordTextWithMode } from "../chunk.js";
 import { resolveDiscordDraftStreamingChunking } from "../draft-chunking.js";
 import { createDiscordDraftStream } from "../draft-stream.js";
@@ -56,6 +57,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function isProcessAborted(abortSignal?: AbortSignal): boolean {
+  return Boolean(abortSignal?.aborted);
 }
 
 type DiscordLifecycleEvent =
@@ -140,6 +145,7 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     threadBindings,
     route,
     commandAuthorized,
+    abortSignal,
   } = ctx;
 
   const mediaList = await resolveMediaList(message, mediaMaxBytes);
@@ -186,6 +192,8 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     enabled: statusReactionsEnabled,
     adapter: discordAdapter,
     initialEmoji: ackReaction,
+    emojis: cfg.messages?.statusReactions?.emojis,
+    timing: cfg.messages?.statusReactions?.timing,
     onError: (err) => {
       logAckFailure({
         log: logVerbose,
@@ -469,6 +477,11 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     channel: "discord",
     accountId,
   });
+  const maxLinesPerMessage = resolveDiscordMaxLinesPerMessage({
+    cfg,
+    discordConfig,
+    accountId,
+  });
   const chunkMode = resolveChunkMode(cfg, "discord", accountId);
 
   const typingCallbacks = createTypingCallbacks({
@@ -525,7 +538,7 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     const formatted = convertMarkdownTables(text, tableMode);
     const chunks = chunkDiscordTextWithMode(formatted, {
       maxChars: draftMaxChars,
-      maxLines: discordConfig?.maxLinesPerMessage,
+      maxLines: maxLinesPerMessage,
       chunkMode,
     });
     if (!chunks.length && formatted) {
@@ -641,6 +654,7 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     emitLifecycle("send_start", { kind: "fallback", reason: trigger });
     try {
       await deliverDiscordReply({
+        cfg,
         replies: [fallbackPayload],
         target: deliverTarget,
         token,
@@ -678,6 +692,9 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
       if (isFinal) {
         finalSendAttempts += 1;
         emitLifecycle("send_start", { kind: info.kind });
+      }
+      if (payload.isReasoning) {
+        return;
       }
       if (info.kind === "block") {
         // Block payloads carry reasoning/thinking content that should not be
@@ -763,6 +780,7 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
 
         const replyToId = replyReference.use();
         await deliverDiscordReply({
+          cfg,
           replies: [payload],
           target: deliverTarget,
           token,
@@ -772,7 +790,7 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
           replyToId,
           replyToMode,
           textLimit,
-          maxLinesPerMessage: discordConfig?.maxLinesPerMessage,
+          maxLinesPerMessage,
           tableMode,
           chunkMode,
           sessionKey: ctxPayload.SessionKey,
@@ -893,6 +911,19 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
         onToolStart: async (payload) => {
           await statusReactions.setTool(payload.name);
         },
+        onCompactionStart: async () => {
+          if (isProcessAborted(abortSignal)) {
+            return;
+          }
+          await statusReactions.setCompacting();
+        },
+        onCompactionEnd: async () => {
+          if (isProcessAborted(abortSignal)) {
+            return;
+          }
+          statusReactions.cancelPending();
+          await statusReactions.setThinking();
+        },
       },
     });
   } catch (err) {
@@ -936,9 +967,6 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     ...(dispatchThrown ? { error: String(dispatchThrown) } : {}),
   });
   emitTerminalLifecycleBackstop(dispatchThrown ? "error" : "end");
-  if (dispatchThrown) {
-    throw dispatchThrown;
-  }
 
   if (!dispatchResult?.queuedFinal) {
     if (isGuildMessage) {

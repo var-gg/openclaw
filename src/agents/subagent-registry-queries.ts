@@ -9,6 +9,10 @@ export type PendingDescendantRunsSummary = {
   wakePending: number;
 };
 
+function resolveControllerSessionKey(entry: SubagentRunRecord): string {
+  return entry.controllerSessionKey?.trim() || entry.requesterSessionKey;
+}
+
 export function findRunIdsByChildSessionKeyFromRuns(
   runs: Map<string, SubagentRunRecord>,
   childSessionKey: string,
@@ -57,6 +61,17 @@ export function listRunsForRequesterFromRuns(
     }
     return true;
   });
+}
+
+export function listRunsForControllerFromRuns(
+  runs: Map<string, SubagentRunRecord>,
+  controllerSessionKey: string,
+): SubagentRunRecord[] {
+  const key = controllerSessionKey.trim();
+  if (!key) {
+    return [];
+  }
+  return [...runs.values()].filter((entry) => resolveControllerSessionKey(entry) === key);
 }
 
 function findLatestRunForChildSession(
@@ -112,9 +127,9 @@ export function shouldIgnorePostCompletionAnnounceForSessionFromRuns(
 
 export function countActiveRunsForSessionFromRuns(
   runs: Map<string, SubagentRunRecord>,
-  requesterSessionKey: string,
+  controllerSessionKey: string,
 ): number {
-  const key = requesterSessionKey.trim();
+  const key = controllerSessionKey.trim();
   if (!key) {
     return 0;
   }
@@ -131,7 +146,7 @@ export function countActiveRunsForSessionFromRuns(
 
   let count = 0;
   for (const entry of runs.values()) {
-    if (entry.requesterSessionKey !== key) {
+    if (resolveControllerSessionKey(entry) !== key) {
       continue;
     }
     if (typeof entry.endedAt !== "number") {
