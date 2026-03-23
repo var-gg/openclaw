@@ -1,0 +1,140 @@
+version: 1
+updated_at: TODO
+notes:
+  - This graph records who reads which Markdown/control-plane docs.
+  - auto_loaded means the consumer is expected to read it without extra human direction.
+  - referenced means the doc is discoverable/consulted, but not part of mandatory startup.
+  - runtime_refs are non-repo or runtime-located docs/paths; leave TODO placeholders instead of guessing.
+consumers:
+  - consumer_type: session
+    consumer_id: maintainer-agent-root
+    reads:
+      - AGENTS.md
+    auto_loaded:
+      - AGENTS.md
+    referenced:
+      - README.md
+      - SECURITY.md
+      - CONTRIBUTING.md
+      - CHANGELOG.md
+      - VISION.md
+      - topology/md-index.yaml
+      - topology/load-graph.yaml
+      - docs/generated/START-HERE.md
+      - docs/generated/MD-MAP.md
+      - docs/generated/ORPHANS.md
+    runtime_refs: []
+    writes:
+      - docs/generated/START-HERE.md
+      - docs/generated/MD-MAP.md
+      - docs/generated/ORPHANS.md
+      - topology/md-index.yaml
+      - topology/load-graph.yaml
+    notes: Root repo coding/maintenance session for this repository.
+
+  - consumer_type: session
+    consumer_id: gateway-server-methods-agent
+    reads:
+      - AGENTS.md
+      - src/gateway/server-methods/AGENTS.md
+    auto_loaded:
+      - AGENTS.md
+      - src/gateway/server-methods/AGENTS.md
+    referenced:
+      - src/gateway/server-methods/CLAUDE.md
+      - SECURITY.md
+      - topology/md-index.yaml
+      - docs/generated/MD-MAP.md
+    runtime_refs: []
+    writes: []
+    notes: Subtree-focused coding session for gateway server-methods.
+
+  - consumer_type: session
+    consumer_id: claude-compatible-session
+    reads:
+      - AGENTS.md
+      - CLAUDE.md
+    auto_loaded:
+      - AGENTS.md
+    referenced:
+      - CLAUDE.md
+      - src/gateway/server-methods/CLAUDE.md
+      - topology/md-index.yaml
+    runtime_refs: []
+    writes: []
+    notes: Compatibility path for Claude/Codex-style repo consumers.
+
+  - consumer_type: cron
+    consumer_id: repo-md-map-regenerator
+    reads:
+      - topology/md-index.yaml
+      - topology/load-graph.yaml
+      - README.md
+    auto_loaded:
+      - topology/md-index.yaml
+      - topology/load-graph.yaml
+    referenced:
+      - scripts/build-md-map.ps1
+    runtime_refs:
+      - TODO(runtime cron registration path / scheduler definition)
+    writes:
+      - docs/generated/START-HERE.md
+      - docs/generated/MD-MAP.md
+      - docs/generated/ORPHANS.md
+    notes: Planned regeneration job; not wired yet.
+
+  - consumer_type: subagent
+    consumer_id: md-map-builder
+    reads:
+      - topology/md-index.yaml
+      - topology/load-graph.yaml
+      - README.md
+      - AGENTS.md
+    auto_loaded:
+      - AGENTS.md
+    referenced:
+      - scripts/build-md-map.ps1
+      - docs/generated/START-HERE.md
+      - docs/generated/MD-MAP.md
+      - docs/generated/ORPHANS.md
+    runtime_refs: []
+    writes:
+      - docs/generated/START-HERE.md
+      - docs/generated/MD-MAP.md
+      - docs/generated/ORPHANS.md
+    notes: Builder/maintainer subagent that materializes generated docs from topology.
+
+  - consumer_type: session
+    consumer_id: workspace-template-author
+    reads:
+      - docs/reference/AGENTS.default.mdx
+      - docs/reference/templates/AGENTS.mdx
+      - docs/reference/templates/BOOTSTRAP.mdx
+      - docs/reference/templates/IDENTITY.mdx
+      - docs/reference/templates/SOUL.mdx
+      - docs/reference/templates/TOOLS.mdx
+      - docs/reference/templates/USER.mdx
+    auto_loaded: []
+    referenced:
+      - topology/md-index.yaml
+      - docs/generated/MD-MAP.md
+    runtime_refs:
+      - TODO(workspace runtime injection path outside repo)
+    writes: []
+    notes: Human or agent working on workspace bootstrap/template docs.
+
+  - consumer_type: session
+    consumer_id: bundled-hook-maintainer
+    reads:
+      - src/hooks/bundled/README.md
+      - src/hooks/bundled/boot-md/HOOK.md
+      - src/hooks/bundled/bootstrap-extra-files/HOOK.md
+      - src/hooks/bundled/command-logger/HOOK.md
+      - src/hooks/bundled/session-memory/HOOK.md
+    auto_loaded: []
+    referenced:
+      - topology/md-index.yaml
+      - docs/generated/MD-MAP.md
+    runtime_refs: []
+    writes: []
+    notes: Maintainer of bundled runtime hooks; hook docs are runtime-adjacent references, not top-level operator docs.

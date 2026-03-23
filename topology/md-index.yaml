@@ -1,0 +1,258 @@
+version: 1
+updated_at: TODO
+notes:
+  - Canonical inventory for Markdown/control-plane docs in this repo.
+  - Do not guess machine-specific absolute paths; use TODO placeholders when runtime location is unknown.
+  - Separate canonical topology/architecture docs from machine-specific operational docs.
+documents:
+  - id: repo-readme
+    path: README.md
+    scope: shared
+    class: reference
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: human-entry
+    notes: Public repo landing page; now points readers to generated topology docs.
+
+  - id: repo-agents
+    path: AGENTS.md
+    scope: shared
+    class: managed-shared
+    load_mode: auto
+    source_of_truth: repo
+    owner_session: codex-maintainer-session
+    notes: Repository operating rules for coding agents and maintainers.
+
+  - id: repo-vision
+    path: VISION.md
+    scope: shared
+    class: reference
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: human-maintainer
+    notes: Product intent and longer-horizon narrative.
+
+  - id: repo-security
+    path: SECURITY.md
+    scope: shared
+    class: reference
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: security-review-session
+    notes: Canonical security/trust-boundary reference for advisories and triage.
+
+  - id: repo-contributing
+    path: CONTRIBUTING.md
+    scope: shared
+    class: reference
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: contributor-session
+    notes: Human contributor workflow; not auto-loaded into runtime sessions by default.
+
+  - id: repo-changelog
+    path: CHANGELOG.md
+    scope: shared
+    class: reference
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: release-session
+    notes: Release history; append-only user-facing changes.
+
+  - id: repo-claude
+    path: CLAUDE.md
+    scope: shared
+    class: managed-shared
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: claude-session
+    notes: Minimal compatibility shim for Claude-oriented tooling.
+
+  - id: gateway-server-methods-agents
+    path: src/gateway/server-methods/AGENTS.md
+    scope: project
+    class: managed-shared
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: gateway-server-methods-session
+    notes: Localized guidance for work inside gateway server methods.
+
+  - id: gateway-server-methods-claude
+    path: src/gateway/server-methods/CLAUDE.md
+    scope: project
+    class: managed-shared
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: claude-server-methods-session
+    notes: Claude compatibility companion for server-methods subtree.
+
+  - id: hook-bundled-readme
+    path: src/hooks/bundled/README.md
+    scope: project
+    class: reference
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: hooks-maintainer-session
+    notes: Overview of bundled hooks; human-readable entry for hook authors.
+
+  - id: hook-boot-md
+    path: src/hooks/bundled/boot-md/HOOK.md
+    scope: project
+    class: reference
+    load_mode: runtime-only
+    source_of_truth: repo
+    owner_session: runtime-hook-loader
+    notes: Hook contract/reference for boot-md runtime hook.
+
+  - id: hook-bootstrap-extra-files
+    path: src/hooks/bundled/bootstrap-extra-files/HOOK.md
+    scope: project
+    class: reference
+    load_mode: runtime-only
+    source_of_truth: repo
+    owner_session: runtime-hook-loader
+    notes: Hook contract/reference for bootstrap-extra-files runtime hook.
+
+  - id: hook-command-logger
+    path: src/hooks/bundled/command-logger/HOOK.md
+    scope: project
+    class: reference
+    load_mode: runtime-only
+    source_of_truth: repo
+    owner_session: runtime-hook-loader
+    notes: Hook contract/reference for command-logger runtime hook.
+
+  - id: hook-session-memory
+    path: src/hooks/bundled/session-memory/HOOK.md
+    scope: project
+    class: reference
+    load_mode: runtime-only
+    source_of_truth: repo
+    owner_session: runtime-hook-loader
+    notes: Hook contract/reference for session-memory runtime hook.
+
+  - id: generated-start-here
+    path: docs/generated/START-HERE.md
+    scope: shared
+    class: reference
+    load_mode: generated
+    source_of_truth: repo
+    owner_session: md-map-builder
+    notes: 3-minute orientation generated from topology inventory.
+
+  - id: generated-md-map
+    path: docs/generated/MD-MAP.md
+    scope: shared
+    class: reference
+    load_mode: generated
+    source_of_truth: repo
+    owner_session: md-map-builder
+    notes: Human-readable map of canonical Markdown/control-plane topology.
+
+  - id: generated-orphans
+    path: docs/generated/ORPHANS.md
+    scope: shared
+    class: scratch
+    load_mode: generated
+    source_of_truth: repo
+    owner_session: md-map-builder
+    notes: Candidate Markdown files not yet registered in topology/md-index.yaml.
+
+  - id: topology-md-index
+    path: topology/md-index.yaml
+    scope: shared
+    class: managed-shared
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: md-map-builder
+    notes: Canonical Markdown inventory for this repository.
+
+  - id: topology-load-graph
+    path: topology/load-graph.yaml
+    scope: shared
+    class: managed-shared
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: md-map-builder
+    notes: Canonical consumer-to-doc loading graph.
+
+  - id: md-map-builder-script
+    path: scripts/build-md-map.ps1
+    scope: runtime-ref
+    class: managed-shared
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: md-map-builder
+    notes: Scaffold script intended to regenerate docs/generated/* from topology/*.yaml.
+
+  - id: workspace-agents-template
+    path: docs/reference/templates/AGENTS.mdx
+    scope: shared
+    class: reference
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: workspace-template-maintainer
+    notes: Template/reference for workspace AGENTS. Canonical for template content, not runtime-loaded from this repo.
+
+  - id: workspace-bootstrap-template
+    path: docs/reference/templates/BOOTSTRAP.mdx
+    scope: shared
+    class: guarded-bootstrap
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: workspace-template-maintainer
+    notes: Template/reference for bootstrap behavior in user workspaces.
+
+  - id: workspace-identity-template
+    path: docs/reference/templates/IDENTITY.mdx
+    scope: shared
+    class: reference
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: workspace-template-maintainer
+    notes: Template/reference for workspace identity file.
+
+  - id: workspace-soul-template
+    path: docs/reference/templates/SOUL.mdx
+    scope: shared
+    class: reference
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: workspace-template-maintainer
+    notes: Template/reference for persona guidance in user workspaces.
+
+  - id: workspace-tools-template
+    path: docs/reference/templates/TOOLS.mdx
+    scope: shared
+    class: reference
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: workspace-template-maintainer
+    notes: Template/reference for environment-specific notes in user workspaces.
+
+  - id: workspace-user-template
+    path: docs/reference/templates/USER.mdx
+    scope: shared
+    class: reference
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: workspace-template-maintainer
+    notes: Template/reference for user profile file in workspaces.
+
+  - id: default-agents-reference
+    path: docs/reference/AGENTS.default.mdx
+    scope: shared
+    class: reference
+    load_mode: referenced
+    source_of_truth: repo
+    owner_session: workspace-template-maintainer
+    notes: Default injected AGENTS reference for OpenClaw workspaces.
+
+  - id: operations-machine-specific-placeholder
+    path: TODO(machine-specific-operations-docs)
+    scope: runtime-ref
+    class: scratch
+    load_mode: runtime-only
+    source_of_truth: runtime
+    owner_session: runtime-operator
+    notes: Placeholder bucket for host/device-specific operational markdown that must stay separate from canonical topology docs.
