@@ -6,13 +6,42 @@ user-invocable: false
 
 # ACP Harness Router
 
-When user intent is "run this in Pi/Claude Code/Codex/OpenCode/Gemini/Kimi (ACP harness)", do not use subagent runtime or PTY scraping. Route through ACP-aware flows.
+When user intent is explicitly marked as ACP harness work, do not use subagent runtime or PTY scraping. Route through ACP-aware flows.
+
+## Global routing rule (hard rule)
+
+Default delegated work runtime is `subagent`.
+
+Use ACP **only when the user's message literally includes the token/string `ACP`**.
+
+Examples that allow ACP routing:
+
+- `ACP codex`
+- `ACP claude`
+- `ACP gemini`
+- `ACP로 돌려`
+
+Examples that must still route to `subagent`:
+
+- `codex로 해봐`
+- `claude로 돌려`
+- `gemini 써`
+- `코딩 에이전트 써`
+- `백그라운드 에이전트`
+- `에이전트로 돌려`
+
+Do not infer ACP from:
+
+- harness/vendor names alone
+- prior conversation context
+- likely user intent
+- generic terms like coding/background/agent
 
 ## Intent detection
 
-Trigger this skill when the user asks OpenClaw to:
+Trigger this skill only when the user asks OpenClaw to do ACP-marked work, meaning the request explicitly contains `ACP`, and also asks OpenClaw to:
 
-- run something in Pi / Claude Code / Codex / OpenCode / Gemini
+- run something in Pi / Claude Code / Codex / OpenCode / Gemini / Kimi
 - continue existing harness work
 - relay instructions to an external coding harness
 - keep an external harness conversation in a thread-like conversation
