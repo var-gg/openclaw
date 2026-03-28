@@ -32,6 +32,12 @@ export type ActiveEmbeddedRunSnapshotEntry = {
   startedAt: number;
 };
 
+export type ActiveEmbeddedRunSnapshot = {
+  transcriptLeafId: string | null;
+  messages?: unknown[];
+  inFlightPrompt?: string;
+};
+
 type EmbeddedRunWaiter = {
   resolve: (ended: boolean) => void;
   timer: NodeJS.Timeout;
@@ -45,9 +51,11 @@ const EMBEDDED_RUN_STATE_KEY = Symbol.for("openclaw.embeddedRunState");
 
 const embeddedRunState = resolveGlobalSingleton(EMBEDDED_RUN_STATE_KEY, () => ({
   activeRuns: new Map<string, ActiveEmbeddedRunEntry>(),
+  snapshots: new Map<string, ActiveEmbeddedRunSnapshot>(),
   waiters: new Map<string, Set<EmbeddedRunWaiter>>(),
 }));
 const ACTIVE_EMBEDDED_RUNS = embeddedRunState.activeRuns;
+const ACTIVE_EMBEDDED_RUN_SNAPSHOTS = embeddedRunState.snapshots;
 const EMBEDDED_RUN_WAITERS = embeddedRunState.waiters;
 
 export function queueEmbeddedPiMessage(sessionId: string, text: string): boolean {
@@ -178,6 +186,12 @@ function resolveEmbeddedRunSourceKind(params: {
   return "unknown";
 }
 
+export function getActiveEmbeddedRunSnapshot(
+  sessionId: string,
+): ActiveEmbeddedRunSnapshot | undefined {
+  return ACTIVE_EMBEDDED_RUN_SNAPSHOTS.get(sessionId);
+}
+
 /**
  * Wait for active embedded runs to drain.
  *
@@ -293,6 +307,16 @@ export function setActiveEmbeddedRun(
   });
 }
 
+export function updateActiveEmbeddedRunSnapshot(
+  sessionId: string,
+  snapshot: ActiveEmbeddedRunSnapshot,
+) {
+  if (!ACTIVE_EMBEDDED_RUNS.has(sessionId)) {
+    return;
+  }
+  ACTIVE_EMBEDDED_RUN_SNAPSHOTS.set(sessionId, snapshot);
+}
+
 export function clearActiveEmbeddedRun(
   sessionId: string,
   handle: EmbeddedPiQueueHandle,
@@ -301,6 +325,7 @@ export function clearActiveEmbeddedRun(
   const entry = ACTIVE_EMBEDDED_RUNS.get(sessionId);
   if (entry?.handle === handle) {
     ACTIVE_EMBEDDED_RUNS.delete(sessionId);
+    ACTIVE_EMBEDDED_RUN_SNAPSHOTS.delete(sessionId);
     logSessionStateChange({ sessionId, sessionKey, state: "idle", reason: "run_completed" });
     if (!sessionId.startsWith("probe-")) {
       diag.debug(`run cleared: sessionId=${sessionId} totalActive=${ACTIVE_EMBEDDED_RUNS.size}`);
@@ -332,6 +357,7 @@ export const __testing = {
     }
     EMBEDDED_RUN_WAITERS.clear();
     ACTIVE_EMBEDDED_RUNS.clear();
+    ACTIVE_EMBEDDED_RUN_SNAPSHOTS.clear();
   },
 };
 
