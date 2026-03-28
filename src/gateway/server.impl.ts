@@ -749,6 +749,7 @@ export async function startGatewayServer(
   let channelHealthMonitor: ReturnType<typeof startChannelHealthMonitor> | null = null;
   let stopModelPricingRefresh = () => {};
   let configReloader: { stop: () => Promise<void> } = { stop: async () => {} };
+  let agentChannelActivityMonitor: { stop: () => Promise<void> } | null = null;
   const closeOnStartupFailure = async () => {
     if (diagnosticsEnabled) {
       stopDiagnosticHeartbeat();
@@ -847,7 +848,6 @@ export async function startGatewayServer(
       bonjourStop = discovery.bonjourStop;
     }
 
-    let agentChannelActivityMonitor: { stop: () => Promise<void> } | null = null;
     if (!minimalTestGateway) {
       ({ browserControl, pluginServices, agentChannelActivityMonitor } = await startGatewaySidecars({
         cfg: cfgAtStart,
