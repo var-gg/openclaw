@@ -23,7 +23,6 @@ vi.mock("@mariozechner/pi-ai/oauth", async () => {
 
 vi.mock("../cli-credentials.js", () => ({
   readCodexCliCredentialsCached: () => null,
-  readQwenCliCredentialsCached: () => null,
   readMiniMaxCliCredentialsCached: () => null,
   resetCliCredentialCachesForTest: () => undefined,
 }));
@@ -153,7 +152,7 @@ describe("resolveApiKeyForProfile fallback to main agent", () => {
   }
 
   it("falls back to main agent credentials when secondary agent token is expired and refresh fails", async () => {
-    const profileId = "anthropic:claude-cli";
+    const profileId = "anthropic:default";
     const now = Date.now();
     const expiredTime = now - 60 * 60 * 1000; // 1 hour ago
     const freshTime = now + 60 * 60 * 1000; // 1 hour from now
@@ -200,7 +199,7 @@ describe("resolveApiKeyForProfile fallback to main agent", () => {
   });
 
   it("adopts newer OAuth token from main agent even when secondary token is still valid", async () => {
-    const profileId = "anthropic:claude-cli";
+    const profileId = "anthropic:default";
     const now = Date.now();
     const secondaryExpiry = now + 30 * 60 * 1000;
     const mainExpiry = now + 2 * 60 * 60 * 1000;
@@ -239,7 +238,7 @@ describe("resolveApiKeyForProfile fallback to main agent", () => {
   });
 
   it("adopts main token when secondary expires is NaN/malformed", async () => {
-    const profileId = "anthropic:claude-cli";
+    const profileId = "anthropic:default";
     const now = Date.now();
     const mainExpiry = now + 2 * 60 * 60 * 1000;
 
@@ -313,7 +312,7 @@ describe("resolveApiKeyForProfile fallback to main agent", () => {
   });
 
   it("throws error when both secondary and main agent credentials are expired", async () => {
-    const profileId = "anthropic:claude-cli";
+    const profileId = "anthropic:default";
     const now = Date.now();
     const expiredTime = now - 60 * 60 * 1000; // 1 hour ago
 

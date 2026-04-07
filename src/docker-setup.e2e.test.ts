@@ -28,7 +28,7 @@ if [[ "\${1:-}" == "build" ]]; then
     echo "build-fail $*" >>"$log"
     exit 1
   fi
-  echo "build $*" >>"$log"
+  echo "build DOCKER_BUILDKIT=\${DOCKER_BUILDKIT:-} $*" >>"$log"
   exit 0
 fi
 if [[ "\${1:-}" == "compose" ]]; then
@@ -230,13 +230,7 @@ describe("scripts/docker/setup.sh", () => {
       "run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js onboard --mode local --no-install-daemon",
     );
     expect(log).toContain(
-      "run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config set gateway.mode local",
-    );
-    expect(log).toContain(
-      "run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config set gateway.bind lan",
-    );
-    expect(log).toContain(
-      'run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config set gateway.controlUi.allowedOrigins ["http://localhost:18789","http://127.0.0.1:18789"] --strict-json',
+      'run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config set --batch-json [{"path":"gateway.mode","value":"local"},{"path":"gateway.bind","value":"lan"},{"path":"gateway.controlUi.allowedOrigins","value":["http://localhost:18789","http://127.0.0.1:18789"]}]',
     );
     expect(log).not.toContain("run --rm openclaw-cli onboard --mode local --no-install-daemon");
   });
@@ -256,6 +250,23 @@ describe("scripts/docker/setup.sh", () => {
     expect(prestartLines.some((line) => /\bcompose\b.*\brun\b.*\bopenclaw-cli\b/.test(line))).toBe(
       false,
     );
+  });
+
+  it("forces BuildKit for local and sandbox docker builds", async () => {
+    const activeSandbox = requireSandbox(sandbox);
+    await writeFile(join(activeSandbox.rootDir, "Dockerfile.sandbox"), "FROM scratch\n");
+    await resetDockerLog(activeSandbox);
+
+    const result = runDockerSetup(activeSandbox, {
+      OPENCLAW_SANDBOX: "1",
+    });
+
+    expect(result.status).toBe(0);
+    const buildLines = (await readDockerLogLines(activeSandbox)).filter((line) =>
+      line.startsWith("build "),
+    );
+    expect(buildLines.length).toBeGreaterThanOrEqual(2);
+    expect(buildLines.every((line) => line.includes("DOCKER_BUILDKIT=1"))).toBe(true);
   });
 
   it("precreates config identity dir for CLI device auth writes", async () => {

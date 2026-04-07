@@ -1,6 +1,6 @@
 import { resolveAgentConfig } from "../agents/agent-scope.js";
 import { resolveSandboxConfigForAgent } from "../agents/sandbox.js";
-import { resolveEffectiveSandboxToolPolicyForAgent } from "../agents/tool-policy-sandbox.js";
+import { resolveSandboxToolPolicyForAgent } from "../agents/sandbox/tool-policy.js";
 import { normalizeAnyChannelId } from "../channels/registry.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { loadConfig } from "../config/config.js";
@@ -146,7 +146,7 @@ export async function sandboxExplainCommand(
   });
 
   const sandboxCfg = resolveSandboxConfigForAgent(cfg, resolvedAgentId);
-  const toolPolicy = resolveEffectiveSandboxToolPolicyForAgent(cfg, resolvedAgentId);
+  const toolPolicy = resolveSandboxToolPolicyForAgent(cfg, resolvedAgentId);
   const mainSessionKey = resolveAgentMainSessionKey({
     cfg,
     agentId: resolvedAgentId,
@@ -237,7 +237,6 @@ export async function sandboxExplainCommand(
     sandbox: {
       mode: sandboxCfg.mode,
       scope: sandboxCfg.scope,
-      perSession: sandboxCfg.scope === "session",
       workspaceAccess: sandboxCfg.workspaceAccess,
       workspaceRoot: sandboxCfg.workspaceRoot,
       sessionIsSandboxed,
@@ -286,7 +285,7 @@ export async function sandboxExplainCommand(
   lines.push(
     `  ${key("mode:")} ${value(payload.sandbox.mode)} ${key("scope:")} ${value(
       payload.sandbox.scope,
-    )} ${key("perSession:")} ${bool(payload.sandbox.perSession)}`,
+    )}`,
   );
   lines.push(
     `  ${key("workspaceAccess:")} ${value(

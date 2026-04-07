@@ -1,16 +1,15 @@
 import type { OpenClawConfig } from "../config/config.js";
-import { normalizeResolvedSecretInputString } from "../config/types.secrets.js";
+import { normalizeSecretInputString, resolveSecretInputRef } from "../config/types.secrets.js";
 import { logVerbose } from "../globals.js";
 import type {
   PluginWebSearchProviderEntry,
   WebSearchProviderToolDefinition,
 } from "../plugins/types.js";
-import { resolveBundledPluginWebSearchProviders } from "../plugins/web-search-providers.js";
 import { resolvePluginWebSearchProviders } from "../plugins/web-search-providers.runtime.js";
 import { resolveRuntimeWebSearchProviders } from "../plugins/web-search-providers.runtime.js";
 import { sortWebSearchProvidersForAutoDetect } from "../plugins/web-search-providers.shared.js";
+import { getActiveRuntimeWebToolsMetadata } from "../secrets/runtime-web-tools-state.js";
 import type { RuntimeWebSearchMetadata } from "../secrets/runtime-web-tools.types.js";
-import { getActiveRuntimeWebToolsMetadata } from "../secrets/runtime.js";
 import { normalizeSecretInput } from "../utils/normalize-secret-input.js";
 
 type WebSearchConfig = NonNullable<OpenClawConfig["tools"]>["web"] extends infer Web
@@ -72,6 +71,7 @@ function hasEntryCredential(
   provider: Pick<
     PluginWebSearchProviderEntry,
     | "credentialPath"
+    | "id"
     | "envVars"
     | "getConfiguredCredentialValue"
     | "getCredentialValue"
@@ -83,15 +83,24 @@ function hasEntryCredential(
   if (!providerRequiresCredential(provider)) {
     return true;
   }
+  const configuredValue = provider.getConfiguredCredentialValue?.(config);
   const rawValue =
-    provider.getConfiguredCredentialValue?.(config) ??
-    provider.getCredentialValue(search as Record<string, unknown> | undefined);
-  const fromConfig = normalizeSecretInput(
-    normalizeResolvedSecretInputString({
-      value: rawValue,
-      path: provider.credentialPath,
-    }),
-  );
+    configuredValue ??
+    (provider.id === "brave"
+      ? provider.getCredentialValue(search as Record<string, unknown> | undefined)
+      : undefined);
+  const configuredRef = resolveSecretInputRef({
+    value: rawValue,
+  }).ref;
+  if (configuredRef && configuredRef.source !== "env") {
+    return true;
+  }
+  const fromConfig = normalizeSecretInput(normalizeSecretInputString(rawValue));
+  if (configuredRef?.source === "env") {
+    return Boolean(
+      normalizeSecretInput(process.env[configuredRef.id]) || readProviderEnvValue(provider.envVars),
+    );
+  }
   return Boolean(fromConfig || readProviderEnvValue(provider.envVars));
 }
 
@@ -120,9 +129,10 @@ export function resolveWebSearchProviderId(params: {
 }): string {
   const providers = sortWebSearchProvidersForAutoDetect(
     params.providers ??
-      resolveBundledPluginWebSearchProviders({
+      resolvePluginWebSearchProviders({
         config: params.config,
         bundledAllowlistCompat: true,
+        origin: "bundled",
       }),
   );
   const raw =
@@ -178,9 +188,10 @@ export function resolveWebSearchDefinition(
           config: options?.config,
           bundledAllowlistCompat: true,
         })
-      : resolveBundledPluginWebSearchProviders({
+      : resolvePluginWebSearchProviders({
           config: options?.config,
           bundledAllowlistCompat: true,
+          origin: "bundled",
         }),
   ).filter(Boolean);
   if (providers.length === 0) {
