@@ -30,6 +30,41 @@ type LegacySubagentRunRecord = PersistedSubagentRunRecord & {
   requesterAccountId?: unknown;
 };
 
+function normalizePersistedCleanupState(params: {
+  cleanupCompletedAt?: number;
+  cleanupHandled?: boolean;
+  endedAt?: number;
+  isLegacy: boolean;
+}): {
+  cleanupCompletedAt?: number;
+  cleanupHandled?: boolean;
+  migrated: boolean;
+} {
+  let migrated = false;
+  let cleanupCompletedAt = params.cleanupCompletedAt;
+  let cleanupHandled = params.cleanupHandled;
+
+  // `cleanupHandled=true` is an in-flight marker, not a terminal state. If the
+  // gateway restarts before `cleanupCompletedAt` is persisted, leaving the flag
+  // set prevents resumeSubagentRun() from ever re-entering cleanup. Treat those
+  // records as resumable pending work on restore.
+  if (
+    params.isLegacy !== true &&
+    cleanupHandled === true &&
+    typeof cleanupCompletedAt !== "number" &&
+    typeof params.endedAt === "number"
+  ) {
+    cleanupHandled = false;
+    migrated = true;
+  }
+
+  return {
+    ...(typeof cleanupCompletedAt === "number" ? { cleanupCompletedAt } : {}),
+    ...(typeof cleanupHandled === "boolean" ? { cleanupHandled } : {}),
+    migrated,
+  };
+}
+
 function resolveSubagentStateDir(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = env.OPENCLAW_STATE_DIR?.trim();
   if (explicit) {
@@ -82,6 +117,13 @@ export function loadSubagentRegistryFromDisk(): Map<string, SubagentRunRecord> {
         : isLegacy
           ? Boolean(typed.announceHandled ?? cleanupCompletedAt)
           : undefined;
+    const normalizedCleanup = normalizePersistedCleanupState({
+      cleanupCompletedAt,
+      cleanupHandled,
+      endedAt: typeof typed.endedAt === "number" ? typed.endedAt : undefined,
+      isLegacy,
+    });
+    const { migrated: cleanupMigrated, ...cleanupState } = normalizedCleanup;
     const requesterOrigin = normalizeDeliveryContext(
       typed.requesterOrigin ?? {
         channel: typeof typed.requesterChannel === "string" ? typed.requesterChannel : undefined,
@@ -99,11 +141,10 @@ export function loadSubagentRegistryFromDisk(): Map<string, SubagentRunRecord> {
     out.set(runId, {
       ...rest,
       requesterOrigin,
-      cleanupCompletedAt,
-      cleanupHandled,
+      ...cleanupState,
       spawnMode: typed.spawnMode === "session" ? "session" : "run",
     });
-    if (isLegacy) {
+    if (isLegacy || cleanupMigrated) {
       migrated = true;
     }
   }

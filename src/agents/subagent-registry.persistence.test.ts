@@ -214,6 +214,116 @@ describe("subagent registry persistence", () => {
     envSnapshot.restore();
   });
 
+  it("persists runs to disk and resumes after restart", async () => {
+    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
+    process.env.OPENCLAW_STATE_DIR = tempStateDir;
+
+    const { callGateway } = await import("../gateway/call.js");
+    let releaseInitialWait:
+      | ((value: { status: "ok"; startedAt: number; endedAt: number }) => void)
+      | undefined;
+    vi.mocked(callGateway)
+      .mockImplementationOnce(
+        async () =>
+          await new Promise((resolve) => {
+            releaseInitialWait = resolve as typeof releaseInitialWait;
+          }),
+      )
+      .mockResolvedValueOnce({
+        status: "ok",
+        startedAt: 111,
+        endedAt: 222,
+      });
+
+    registerSubagentRun({
+      runId: "run-1",
+      childSessionKey: "agent:main:subagent:test",
+      requesterSessionKey: "agent:main:main",
+      requesterOrigin: { channel: " whatsapp ", accountId: " acct-main " },
+      requesterDisplayKey: "main",
+      task: "do the thing",
+      cleanup: "keep",
+    });
+    await writeChildSessionEntry({
+      sessionKey: "agent:main:subagent:test",
+      sessionId: "sess-test",
+    });
+
+    const registryPath = path.join(tempStateDir, "subagents", "runs.json");
+    const raw = await fs.readFile(registryPath, "utf8");
+    const parsed = JSON.parse(raw) as { runs?: Record<string, unknown> };
+    expect(parsed.runs && Object.keys(parsed.runs)).toContain("run-1");
+    const run = parsed.runs?.["run-1"] as
+      | {
+          requesterOrigin?: { channel?: string; accountId?: string };
+        }
+      | undefined;
+    expect(run).toBeDefined();
+    if (run) {
+      expect("requesterAccountId" in run).toBe(false);
+      expect("requesterChannel" in run).toBe(false);
+    }
+    expect(run?.requesterOrigin?.channel).toBe("whatsapp");
+    expect(run?.requesterOrigin?.accountId).toBe("acct-main");
+
+    // Simulate a process restart: module re-import should load persisted runs
+    // and trigger the announce flow once the run resolves.
+    resetSubagentRegistryForTests({ persist: false });
+    initSubagentRegistry();
+    releaseInitialWait?.({
+      status: "ok",
+      startedAt: 111,
+      endedAt: 222,
+    });
+
+    // allow queued async wait/cleanup to execute
+    await vi.waitFor(() => {
+      const persisted = loadSubagentRegistryFromDisk().get("run-1");
+      expect(persisted?.childSessionKey).toBe("agent:main:subagent:test");
+      expect(persisted?.requesterOrigin?.channel).toBe("whatsapp");
+      expect(persisted?.requesterOrigin?.accountId).toBe("acct-main");
+      expect(persisted?.endedReason).toBe("subagent-complete");
+      expect(typeof persisted?.cleanupCompletedAt).toBe("number");
+    });
+  });
+
+  it("downgrades persisted in-flight cleanup markers so ended runs can resume cleanup after restart", async () => {
+    const registryPath = await writePersistedRegistry(
+      {
+        version: 2,
+        runs: {
+          "run-stuck-cleanup": {
+            runId: "run-stuck-cleanup",
+            childSessionKey: "agent:main:subagent:stuck-cleanup",
+            requesterSessionKey: "agent:main:main",
+            requesterDisplayKey: "main",
+            task: "resume cleanup",
+            cleanup: "keep",
+            expectsCompletionMessage: true,
+            createdAt: 100,
+            startedAt: 101,
+            endedAt: 200,
+            cleanupHandled: true,
+          },
+        },
+      },
+      { seedChildSessions: false },
+    );
+
+    const restored = loadSubagentRegistryFromDisk();
+    const entry = restored.get("run-stuck-cleanup");
+    expect(entry).toBeDefined();
+    expect(entry?.cleanupHandled).toBe(false);
+    expect(entry?.cleanupCompletedAt).toBeUndefined();
+
+    const persisted = await readPersistedRun<{ cleanupHandled?: boolean; cleanupCompletedAt?: number }>(
+      registryPath,
+      "run-stuck-cleanup",
+    );
+    expect(persisted?.cleanupHandled).toBe(false);
+    expect(persisted?.cleanupCompletedAt).toBeUndefined();
+  });
+
   it("persists completed subagent timing into the child session entry", async () => {
     tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
     process.env.OPENCLAW_STATE_DIR = tempStateDir;
